@@ -9,7 +9,6 @@
 set -e
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 FILES_DIR="$ROOT_DIR/files-for-uploading"
 SYSTEM_PROMPT="$ROOT_DIR/SystemPromt.txt"
@@ -57,9 +56,9 @@ if ! curl -fsS --max-time 5 "$LM_HEALTH_URL" >/dev/null; then
   fail "LM Studio is not reachable at $LM_HEALTH_URL. Please start LM Studio with an OpenAI-compatible server."
 fi
 
-# Install backend dependencies (always), so missing modules like pdf-parse are present.
-status "Installing backend dependencies..."
-npm install --prefix "$BACKEND_DIR"
+# Install project dependencies (always) to ensure required modules like pdf-parse are present.
+status "Installing project dependencies..."
+npm install || fail "npm install failed."
 
 # Install frontend dependencies if missing.
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
@@ -97,18 +96,27 @@ export LM_STUDIO_CHAT_MODEL
 export LM_STUDIO_EMBEDDING_MODEL
 export NODE_ENV=production
 (
-  cd "$BACKEND_DIR" && npm start > "$BACKEND_LOG" 2>&1 &
+  cd "$ROOT_DIR" || exit 1
+  node server.js > "$BACKEND_LOG" 2>&1 &
   echo $! > "$ROOT_DIR/.backend.pid"
 )
 
+# Verify the backend process started.
+if [ ! -f "$ROOT_DIR/.backend.pid" ] || ! kill -0 "$(cat "$ROOT_DIR/.backend.pid")" >/dev/null 2>&1; then
+  fail "Backend failed to start. Check $BACKEND_LOG for details."
+fi
+
 # Wait for the backend health check to succeed.
-HEALTH_URL="http://localhost:${PORT}/health"
+HEALTH_URL="http://localhost:3000/health"
 for attempt in $(seq 1 20); do
   if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
     status "Backend is healthy at $HEALTH_URL (PID $(cat "$ROOT_DIR/.backend.pid"))."
     break
   fi
   sleep 1
+  if ! kill -0 "$(cat "$ROOT_DIR/.backend.pid")" >/dev/null 2>&1; then
+    fail "Backend process exited before becoming healthy. Check $BACKEND_LOG for details."
+  fi
   if [ "$attempt" -eq 20 ]; then
     fail "Backend did not become healthy. Check $BACKEND_LOG for details."
   fi

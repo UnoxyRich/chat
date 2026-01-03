@@ -1,0 +1,96 @@
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import pdf from 'pdf-parse';
+import OpenAI from 'openai';
+import { CONFIG } from '../backend/config.js';
+import {
+  replaceDocumentMetadata,
+  storeEmbeddingChunk,
+  getAllEmbeddings,
+  getDocumentByFilename
+} from '../backend/db.js';
+
+function hashBuffer(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+function splitText(text, chunkSize, chunkOverlap) {
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    const end = Math.min(text.length, start + chunkSize);
+    const chunk = text.slice(start, end).trim();
+    if (chunk.length) {
+      chunks.push(chunk);
+    }
+    start += chunkSize - chunkOverlap;
+  }
+  return chunks;
+}
+
+async function embedBatch(client, texts) {
+  const embeddingModel = CONFIG.lmStudio.embeddingModel;
+  const response = await client.embeddings.create({ model: embeddingModel, input: texts });
+  return response.data.map((item) => item.embedding);
+}
+
+export async function ingestDocuments(db, client) {
+  const files = fs.readdirSync(CONFIG.filesDir).filter((file) => file.toLowerCase().endsWith('.pdf'));
+  for (const file of files) {
+    const fullPath = path.join(CONFIG.filesDir, file);
+    const stat = fs.statSync(fullPath);
+    const buffer = fs.readFileSync(fullPath);
+    const hash = hashBuffer(buffer);
+    const existing = getDocumentByFilename(db, file);
+    if (existing && existing.hash === hash && existing.mtime === stat.mtimeMs) {
+      continue;
+    }
+    const data = await pdf(buffer);
+    const chunks = splitText(data.text, CONFIG.retrieval.chunkSize, CONFIG.retrieval.chunkOverlap);
+    const embeddings = await embedBatch(client, chunks);
+    const docId = replaceDocumentMetadata(db, file, stat.mtimeMs, hash);
+    embeddings.forEach((embedding, idx) => {
+      storeEmbeddingChunk(db, docId, idx, embedding, chunks[idx]);
+    });
+  }
+}
+
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+export async function retrieveContext(db, client, query) {
+  const queryEmbedding = (await embedBatch(client, [query]))[0];
+  const rows = getAllEmbeddings(db);
+  const scored = rows.map((row) => {
+    const vector = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+    const score = cosineSimilarity(queryEmbedding, Array.from(vector));
+    return {
+      score,
+      filename: row.filename,
+      chunkIndex: row.chunk_index,
+      text: row.text
+    };
+  });
+  const top = scored.sort((a, b) => b.score - a.score).slice(0, CONFIG.retrieval.topK);
+  const contextChunks = top.map((item) => ({
+    text: `Source: ${item.filename} [chunk ${item.chunkIndex}]\n${item.text}`,
+    filename: item.filename,
+    chunkIndex: item.chunkIndex,
+    score: item.score
+  }));
+  return { contextChunks, sources: top };
+}
+
+export function createOpenAIClient() {
+  return new OpenAI({ baseURL: CONFIG.lmStudio.baseURL, apiKey: process.env.LM_STUDIO_API_KEY || 'not-needed' });
+}

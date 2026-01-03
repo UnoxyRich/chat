@@ -24,7 +24,7 @@ export const CONFIG = {
 };
 
 export function ensureDirectories() {
-  [path.dirname(CONFIG.dbFile), CONFIG.logDir].forEach((dir) => {
+  [path.dirname(CONFIG.dbFile), CONFIG.logDir, CONFIG.filesDir].forEach((dir) => {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }

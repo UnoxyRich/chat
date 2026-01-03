@@ -1,0 +1,117 @@
+import Database from 'better-sqlite3';
+import { CONFIG } from './config.js';
+
+export function initDatabase() {
+  const db = new Database(CONFIG.dbFile);
+  db.pragma('journal_mode = WAL');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversations (
+      id TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL,
+      last_active_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+    );
+    CREATE TABLE IF NOT EXISTS interactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id TEXT NOT NULL,
+      user_message_id INTEGER,
+      ai_message_id INTEGER,
+      ip TEXT,
+      user_agent TEXT,
+      rag_sources TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+      FOREIGN KEY(user_message_id) REFERENCES messages(id),
+      FOREIGN KEY(ai_message_id) REFERENCES messages(id)
+    );
+    CREATE TABLE IF NOT EXISTS documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      filename TEXT NOT NULL,
+      mtime INTEGER NOT NULL,
+      hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS embeddings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id INTEGER NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      embedding BLOB NOT NULL,
+      text TEXT NOT NULL,
+      FOREIGN KEY(document_id) REFERENCES documents(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_interactions_conversation ON interactions(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_embeddings_document ON embeddings(document_id);
+  `);
+
+  return db;
+}
+
+export function upsertConversation(db, token) {
+  const now = Date.now();
+  const existing = db.prepare('SELECT id FROM conversations WHERE id = ?').get(token);
+  if (!existing) {
+    db.prepare('INSERT INTO conversations(id, created_at, last_active_at) VALUES (?, ?, ?)').run(token, now, now);
+  } else {
+    db.prepare('UPDATE conversations SET last_active_at = ? WHERE id = ?').run(now, token);
+  }
+}
+
+export function addMessage(db, conversationId, role, content) {
+  const now = Date.now();
+  const result = db
+    .prepare('INSERT INTO messages(conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)')
+    .run(conversationId, role, content, now);
+  return { id: result.lastInsertRowid, created_at: now };
+}
+
+export function listMessages(db, conversationId) {
+  return db
+    .prepare('SELECT id, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id ASC')
+    .all(conversationId);
+}
+
+export function logInteraction(db, conversationId, userMessageId, aiMessageId, metadata = {}) {
+  const { ip, userAgent, ragSources } = metadata;
+  db.prepare(
+    'INSERT INTO interactions(conversation_id, user_message_id, ai_message_id, ip, user_agent, rag_sources, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(conversationId, userMessageId, aiMessageId, ip || null, userAgent || null, ragSources || null, Date.now());
+}
+
+export function replaceDocumentMetadata(db, filename, mtime, hash) {
+  const existing = db.prepare('SELECT id FROM documents WHERE filename = ?').get(filename);
+  const now = Date.now();
+  if (existing) {
+    db.prepare('UPDATE documents SET mtime = ?, hash = ? WHERE id = ?').run(mtime, hash, existing.id);
+    db.prepare('DELETE FROM embeddings WHERE document_id = ?').run(existing.id);
+    return existing.id;
+  }
+  const result = db
+    .prepare('INSERT INTO documents(filename, mtime, hash, created_at) VALUES (?, ?, ?, ?)')
+    .run(filename, mtime, hash, now);
+  return result.lastInsertRowid;
+}
+
+export function getDocumentByFilename(db, filename) {
+  return db.prepare('SELECT * FROM documents WHERE filename = ?').get(filename);
+}
+
+export function storeEmbeddingChunk(db, documentId, chunkIndex, embedding, text) {
+  db.prepare(
+    'INSERT INTO embeddings(document_id, chunk_index, embedding, text) VALUES (?, ?, ?, ?)'
+  ).run(documentId, chunkIndex, Buffer.from(new Float32Array(embedding).buffer), text);
+}
+
+export function getAllEmbeddings(db) {
+  return db
+    .prepare('SELECT embeddings.id, documents.filename, embeddings.chunk_index, embeddings.embedding, embeddings.text FROM embeddings JOIN documents ON documents.id = embeddings.document_id')
+    .all();
+}

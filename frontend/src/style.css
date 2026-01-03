@@ -1,0 +1,89 @@
+:root {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color: #0f172a;
+  background-color: #f8fafc;
+}
+
+body {
+  margin: 0;
+  background: linear-gradient(180deg, #f1f5f9 0%, #ffffff 100%);
+}
+
+.app {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+header {
+  margin-bottom: 16px;
+}
+
+header h1 {
+  margin: 0 0 8px 0;
+}
+
+.chat {
+  height: 60vh;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+  overflow-y: auto;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.message {
+  margin-bottom: 12px;
+}
+
+.message .role {
+  font-weight: 600;
+  font-size: 12px;
+  color: #475569;
+  margin-bottom: 4px;
+}
+
+.message .bubble {
+  padding: 12px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.message.assistant .bubble {
+  background: #0f172a;
+  color: #f8fafc;
+  border-color: #0f172a;
+}
+
+.input {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.input input {
+  flex: 1;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+}
+
+.input button {
+  padding: 12px 18px;
+  border-radius: 10px;
+  border: none;
+  background: #0f172a;
+  color: #f8fafc;
+  cursor: pointer;
+}
+
+.status {
+  color: #475569;
+}
+
+.error {
+  color: #b91c1c;
+  font-weight: 600;
+}

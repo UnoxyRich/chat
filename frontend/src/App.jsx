@@ -208,11 +208,14 @@ export default function App() {
   useEffect(() => {
     if (!chatRef.current) return;
     const el = chatRef.current;
-    const atBottom = el.scrollHeight - (el.scrollTop + el.clientHeight) < 120;
-    if (atBottom) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [messages, loading]);
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }, [messages]);
+
+  useEffect(() => {
+    if (!chatRef.current || !loading) return;
+    const el = chatRef.current;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }, [loading]);
 
   const handleStarter = (prompt) => {
     sendMessage(prompt);
@@ -266,15 +269,6 @@ export default function App() {
 
       <div className="app-content">
         <header className="hero">
-          <a
-            className="github-link"
-            href="https://github.com/UnoxyRich/chat"
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label="View on GitHub"
-          >
-            <img src={githubMark} alt="GitHub" />
-          </a>
           <div className="badge">Kollmorgen Product Assistant</div>
         </header>
 
@@ -317,6 +311,16 @@ export default function App() {
           </div>
         </main>
       </div>
+
+      <a
+        className="github-link"
+        href="https://github.com/UnoxyRich/chat"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="View on GitHub"
+      >
+        <img src={githubMark} alt="GitHub" />
+      </a>
 
       <Waves paused={false} />
     </div>

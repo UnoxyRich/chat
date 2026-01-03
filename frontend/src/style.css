@@ -105,9 +105,10 @@ body {
 }
 
 .github-link {
-  position: absolute;
-  top: 2px;
-  right: 4px;
+  position: fixed;
+  top: 16px;
+  right: 18px;
+  z-index: 8;
   width: 46px;
   height: 46px;
   border-radius: 12px;
@@ -490,10 +491,7 @@ textarea:disabled {
   }
 
   .github-link {
-    top: 6px;
-    right: 10px;
-    width: 42px;
-    height: 42px;
+    display: none;
   }
 
   .badge {

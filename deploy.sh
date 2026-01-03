@@ -20,7 +20,7 @@ BACKEND_LOG="$LOG_DIR/backend.log"
 # Safe defaults that align with backend/config.js (overridable via environment).
 PORT="${PORT:-3000}"
 LM_STUDIO_BASE_URL="${LM_STUDIO_BASE_URL:-http://localhost:1234/v1}"
-LM_STUDIO_CHAT_MODEL="${LM_STUDIO_CHAT_MODEL:-gpt-4o-mini}"
+LM_STUDIO_CHAT_MODEL="${LM_STUDIO_CHAT_MODEL:-qwen/qwen3-vl-8b}"
 LM_STUDIO_EMBEDDING_MODEL="${LM_STUDIO_EMBEDDING_MODEL:-text-embedding-3-large}"
 
 status() {

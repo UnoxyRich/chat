@@ -82,8 +82,13 @@ export async function retrieveContext(db, client, query) {
     };
   });
   const top = scored.sort((a, b) => b.score - a.score).slice(0, CONFIG.retrieval.topK);
-  const context = top.map((item) => `Source: ${item.filename} [chunk ${item.chunkIndex}]\n${item.text}`).join('\n\n');
-  return { context, sources: top };
+  const contextChunks = top.map((item) => ({
+    text: `Source: ${item.filename} [chunk ${item.chunkIndex}]\n${item.text}`,
+    filename: item.filename,
+    chunkIndex: item.chunkIndex,
+    score: item.score
+  }));
+  return { contextChunks, sources: top };
 }
 
 export function createOpenAIClient() {

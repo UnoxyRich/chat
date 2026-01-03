@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import Waves from './Waves.jsx';
+import githubMark from './assets/github-mark.svg';
 
 const API_BASE = '';
 const STARTER_PROMPTS = [
@@ -258,6 +259,15 @@ export default function App() {
 
       <div className="app-content">
         <header className="hero">
+          <a
+            className="github-link"
+            href="https://github.com/UnoxyRich/chat"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="View on GitHub"
+          >
+            <img src={githubMark} alt="GitHub" />
+          </a>
           <div className="badge">Kollmorgen Product Assistant</div>
         </header>
 

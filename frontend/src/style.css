@@ -87,6 +87,9 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  width: 100%;
+  position: relative;
+  align-items: center;
 }
 
 .badge {
@@ -99,6 +102,42 @@ body {
   font-weight: 600;
   font-size: 13px;
   letter-spacing: 0.03em;
+}
+
+.github-link {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  transition: opacity 140ms ease, filter 140ms ease, transform 140ms ease;
+}
+
+.github-link img {
+  width: 22px;
+  height: 22px;
+  display: block;
+  filter: invert(1);
+}
+
+.github-link:hover,
+.github-link:focus-visible {
+  opacity: 0.78;
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.github-link:active {
+  opacity: 0.68;
+  transform: translateY(0);
 }
 
 .panel {
@@ -349,6 +388,41 @@ textarea:disabled {
   transform: translateY(-1px);
 }
 
+.starter h2 {
+  margin: 4px 0 8px;
+  color: #f2f2f2;
+}
+
+.starter-caption {
+  margin: 0;
+  color: var(--muted);
+  max-width: 560px;
+}
+
+.starter-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  width: 100%;
+}
+
+.starter-prompts button {
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  color: #e9ecf4;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease, transform 120ms ease;
+}
+
+.starter-prompts button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
+}
+
 textarea {
   width: 100%;
   background: transparent;
@@ -377,12 +451,6 @@ textarea {
 .markdown li { margin: 4px 0; }
 .markdown strong { color: #f5f5f5; }
 .markdown em { color: #c8c8cf; }
-
-.markdown p { margin: 6px 0; }
-.markdown ul { margin: 6px 0 6px 18px; padding: 0; }
-.markdown li { margin: 4px 0; }
-.markdown strong { color: #f5f8ff; }
-.markdown em { color: #c5d2f1; }
 
 .markdown code {
   background: rgba(255, 255, 255, 0.06);
@@ -470,8 +538,14 @@ textarea {
 
 @media (max-width: 640px) {
   .app-content { padding: 20px 14px 36px; }
-  .panel { border-radius: 16px; }
+  .panel { border-radius: 16px; width: 100%; }
   .chat-window { padding: 18px 16px; }
   .input-meta { flex-direction: column; align-items: flex-start; }
   .input-meta button { width: 100%; justify-content: center; }
+  .github-link {
+    top: 6px;
+    right: 6px;
+    width: 44px;
+    height: 44px;
+  }
 }

@@ -57,13 +57,9 @@ if ! curl -fsS --max-time 5 "$LM_HEALTH_URL" >/dev/null; then
   fail "LM Studio is not reachable at $LM_HEALTH_URL. Please start LM Studio with an OpenAI-compatible server."
 fi
 
-# Install backend dependencies if missing.
-if [ ! -d "$BACKEND_DIR/node_modules" ]; then
-  status "Installing backend dependencies..."
-  npm install --prefix "$BACKEND_DIR"
-else
-  status "Backend dependencies already installed."
-fi
+# Install backend dependencies (always), so missing modules like pdf-parse are present.
+status "Installing backend dependencies..."
+npm install --prefix "$BACKEND_DIR"
 
 # Install frontend dependencies if missing.
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then

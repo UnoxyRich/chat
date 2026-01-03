@@ -251,6 +251,13 @@ export default function App() {
     sendMessage();
   };
 
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
   return (
     <div className="app-shell">
       <div className="bg-glow glow-one" />
@@ -301,15 +308,10 @@ export default function App() {
                   value={input}
                   placeholder="Type your message here..."
                   onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
                   disabled={!token || loading}
                   rows={2}
                 />
-                <div className="input-meta">
-                  <p>Token-based conversation. Continue on any device with this link.</p>
-                  <button type="submit" disabled={!token || loading}>
-                    {loading ? 'Working…' : 'Send'}
-                  </button>
-                </div>
               </div>
             </form>
           </div>

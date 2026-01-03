@@ -11,7 +11,7 @@ set -e
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
-FILES_DIR="$ROOT_DIR/files-for-sharing"
+FILES_DIR="$ROOT_DIR/files-for-uploading"
 SYSTEM_PROMPT="$ROOT_DIR/SystemPromt.txt"
 LOG_DIR="$ROOT_DIR/logs"
 DB_DIR="$ROOT_DIR/db"
@@ -46,7 +46,7 @@ status "npm version: $(npm -v)"
 
 # Validate required files and directories.
 [ -f "$SYSTEM_PROMPT" ] || fail "SystemPromt.txt is missing at $SYSTEM_PROMPT"
-[ -d "$FILES_DIR" ] || fail "files-for-sharing/ directory is missing at $FILES_DIR"
+[ -d "$FILES_DIR" ] || fail "files-for-uploading/ directory is missing at $FILES_DIR"
 
 mkdir -p "$LOG_DIR" "$DB_DIR"
 

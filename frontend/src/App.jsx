@@ -259,19 +259,9 @@ export default function App() {
       <div className="app-content">
         <header className="hero">
           <div className="badge">Kollmorgen Product Assistant</div>
-          <h1>Conversational help with product knowledge</h1>
-          <p className="lede">Dark themed chat experience with token-based sessions. Share the link to continue anywhere.</p>
         </header>
 
         <main className="panel">
-          <div className="panel-header">
-            <div>
-              <p className="panel-subtitle">Session anchored</p>
-              <h2 className="panel-title">Ask questions, follow up, and get detailed answers</h2>
-            </div>
-            <div className="session-pill">{token ? 'Session active' : 'Preparing session...'}</div>
-          </div>
-
           <div className="chat-surface">
             <div className="chat-window" ref={chatRef} aria-live="polite">
               {messages.length === 0 && !loading ? (

@@ -25,9 +25,9 @@ export default function Waves({ paused = false }) {
     ];
 
     const colors = [
-      'rgba(102, 126, 234, 0.16)',
-      'rgba(118, 75, 162, 0.12)',
-      'rgba(102, 126, 234, 0.1)'
+      'rgba(255, 255, 255, 0.14)',
+      'rgba(255, 255, 255, 0.1)',
+      'rgba(255, 255, 255, 0.08)'
     ];
 
     let time = 0;

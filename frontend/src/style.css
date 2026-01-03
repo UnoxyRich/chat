@@ -5,13 +5,11 @@
   color: #e9ecf4;
   background-color: #060913;
   color-scheme: dark;
-  --panel-bg: rgba(15, 18, 33, 0.8);
-  --panel-border: rgba(255, 255, 255, 0.06);
-  --accent: #9dd5ff;
-  --accent-strong: #5cd2b1;
-  --muted: #96a0c2;
-  --muted-2: #6f7797;
-  --surface: rgba(20, 24, 43, 0.85);
+  --panel-bg: rgba(12, 12, 14, 0.82);
+  --panel-border: rgba(255, 255, 255, 0.05);
+  --muted: #9fa5b1;
+  --muted-2: #7c818d;
+  --surface: rgba(14, 14, 18, 0.7);
 }
 
 * {
@@ -21,9 +19,9 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: radial-gradient(circle at 20% 20%, rgba(86, 132, 255, 0.12), transparent 30%),
-    radial-gradient(circle at 80% 0%, rgba(126, 228, 199, 0.1), transparent 28%),
-    linear-gradient(180deg, #070a15 0%, #050812 100%);
+  background: radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.06), transparent 32%),
+    radial-gradient(circle at 80% 0%, rgba(255, 255, 255, 0.04), transparent 30%),
+    linear-gradient(180deg, #060608 0%, #040405 100%);
   overflow: hidden;
 }
 
@@ -43,7 +41,10 @@ body {
   z-index: 2;
   max-width: 1200px;
   margin: 0 auto;
-  padding: 32px 20px 48px;
+  padding: 22px 20px 60px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 .bg-glow {
@@ -56,7 +57,7 @@ body {
 .glow-one {
   width: 360px;
   height: 360px;
-  background: rgba(99, 170, 255, 0.4);
+  background: rgba(255, 255, 255, 0.12);
   top: -60px;
   left: -20px;
 }
@@ -64,7 +65,7 @@ body {
 .glow-two {
   width: 320px;
   height: 320px;
-  background: rgba(120, 90, 255, 0.35);
+  background: rgba(255, 255, 255, 0.1);
   bottom: 60px;
   right: -40px;
 }
@@ -82,35 +83,22 @@ body {
 }
 
 .hero {
-  padding: 12px 8px 20px;
+  padding: 6px 0 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .badge {
-  align-self: flex-start;
-  padding: 6px 12px;
+  align-self: center;
+  padding: 6px 14px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #c0d7ff;
+  color: #e5e7eb;
   font-weight: 600;
   font-size: 13px;
   letter-spacing: 0.03em;
-}
-
-.hero h1 {
-  margin: 0;
-  font-size: 30px;
-  color: #f3f6ff;
-}
-
-.lede {
-  margin: 0;
-  color: var(--muted);
-  max-width: 760px;
-  font-size: 16px;
 }
 
 .panel {
@@ -121,45 +109,15 @@ body {
   backdrop-filter: blur(10px);
   display: flex;
   flex-direction: column;
-}
-
-.panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 18px 22px;
-  gap: 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-}
-
-.panel-title {
-  margin: 0;
-  color: #f1f4ff;
-}
-
-.panel-subtitle {
-  margin: 0 0 4px;
-  color: var(--muted-2);
-  text-transform: uppercase;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  font-size: 12px;
-}
-
-.session-pill {
-  padding: 8px 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(126, 228, 199, 0.4);
-  color: #c9f7e6;
-  background: linear-gradient(135deg, rgba(92, 210, 177, 0.12), rgba(157, 213, 255, 0.08));
-  font-weight: 600;
+  width: min(960px, 66vw);
+  margin: 4px auto 20px;
 }
 
 .chat-surface {
   position: relative;
   display: flex;
   flex-direction: column;
-  background: var(--surface);
+  background: transparent;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
   border-radius: 0 0 20px 20px;
   overflow: hidden;
@@ -167,13 +125,14 @@ body {
 
 .chat-window {
   flex: 1;
-  min-height: 420px;
-  max-height: calc(70vh);
+  min-height: 320px;
+  max-height: 60vh;
   overflow-y: auto;
-  padding: 26px 22px 20px;
+  padding: 18px 18px 16px;
   display: flex;
   flex-direction: column;
   gap: 18px;
+  background: rgba(12, 12, 12, 0.3);
 }
 
 .message {
@@ -197,7 +156,7 @@ body {
   padding: 14px 16px;
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.05);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.32);
   color: #e9ecf4;
   width: fit-content;
@@ -213,8 +172,8 @@ body {
 }
 
 .message.user .bubble {
-  background: linear-gradient(120deg, #24314c 0%, #1a243d 100%);
-  border-color: rgba(157, 213, 255, 0.18);
+  background: linear-gradient(120deg, #1b1b1f 0%, #141418 100%);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 .typing {
@@ -239,24 +198,24 @@ body {
 .typing span:nth-child(2) { animation-delay: -0.16s; }
 
 .alert {
-  background: rgba(255, 88, 88, 0.1);
-  border: 1px solid rgba(255, 122, 122, 0.3);
-  color: #ffcbd3;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #f2f2f2;
   padding: 10px 12px;
   border-radius: 10px;
   font-weight: 600;
 }
 
 .chat-form {
-  padding: 10px 12px 16px;
+  padding: 14px 16px 18px;
   border-top: 1px solid rgba(255, 255, 255, 0.05);
-  background: linear-gradient(180deg, rgba(10, 14, 26, 0.8), rgba(10, 14, 26, 0.95));
+  background: linear-gradient(180deg, rgba(6, 6, 8, 0.9), rgba(6, 6, 8, 0.96));
 }
 
 .input-wrapper {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.04);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
   overflow: hidden;
 }
@@ -275,8 +234,8 @@ textarea {
 }
 
 textarea:focus {
-  outline: 2px solid rgba(157, 213, 255, 0.4);
-  box-shadow: 0 0 0 4px rgba(157, 213, 255, 0.1);
+  outline: 2px solid rgba(255, 255, 255, 0.24);
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.06);
 }
 
 textarea:disabled {
@@ -298,9 +257,9 @@ textarea:disabled {
 .input-meta button {
   padding: 10px 16px;
   border-radius: 12px;
-  border: 1px solid rgba(126, 228, 199, 0.4);
-  background: linear-gradient(135deg, #1c2a44 0%, #23365a 100%);
-  color: #dff9f0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(135deg, #1a1a1f 0%, #0f0f12 100%);
+  color: #f3f4f6;
   font-weight: 700;
   cursor: pointer;
   transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
@@ -320,7 +279,7 @@ textarea:disabled {
   border: 1px dashed rgba(255, 255, 255, 0.1);
   border-radius: 16px;
   padding: 22px;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(255, 255, 255, 0.03);
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -339,7 +298,7 @@ textarea:disabled {
   width: 48px;
   height: 48px;
   border-radius: 14px;
-  background: linear-gradient(135deg, rgba(157, 213, 255, 0.25), rgba(126, 228, 199, 0.2));
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.08));
   display: grid;
   place-items: center;
   font-size: 24px;
@@ -357,7 +316,7 @@ textarea:disabled {
 
 .starter h2 {
   margin: 4px 0 8px;
-  color: #f3f6ff;
+  color: #f2f2f2;
 }
 
 .starter-caption {
@@ -378,19 +337,26 @@ textarea:disabled {
   padding: 10px 14px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.05);
   color: #e9ecf4;
   cursor: pointer;
   transition: background 150ms ease, border-color 150ms ease, transform 120ms ease;
 }
 
 .starter-prompts button:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(157, 213, 255, 0.25);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.18);
   transform: translateY(-1px);
 }
 
-.markdown {
+textarea {
+  width: 100%;
+  background: transparent;
+  color: #e9ecf4;
+  border: none;
+  resize: vertical;
+  min-height: 68px;
+  padding: 14px 16px;
   font-size: 15px;
   line-height: 1.7;
   color: #e9ecf4;
@@ -403,8 +369,14 @@ textarea:disabled {
 .markdown h5,
 .markdown h6 {
   margin: 10px 0 6px;
-  color: #f6f8ff;
+  color: #f2f2f2;
 }
+
+.markdown p { margin: 6px 0; }
+.markdown ul { margin: 6px 0 6px 18px; padding: 0; }
+.markdown li { margin: 4px 0; }
+.markdown strong { color: #f5f5f5; }
+.markdown em { color: #c8c8cf; }
 
 .markdown p { margin: 6px 0; }
 .markdown ul { margin: 6px 0 6px 18px; padding: 0; }
@@ -417,12 +389,12 @@ textarea:disabled {
   padding: 2px 6px;
   border-radius: 6px;
   font-family: 'SFMono-Regular', Consolas, Monaco, 'Ubuntu Mono', monospace;
-  color: #8de1c3;
+  color: #d4d4d4;
   font-size: 14px;
 }
 
 .md-code {
-  background: #0b1221;
+  background: #0a0a0c;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
   padding: 12px;
@@ -432,7 +404,7 @@ textarea:disabled {
 .md-code code {
   background: transparent;
   padding: 0;
-  color: #b2d6ff;
+  color: #dcdcdc;
   display: block;
   white-space: pre;
 }
@@ -459,7 +431,7 @@ textarea:disabled {
 
 .md-table th {
   background: rgba(255, 255, 255, 0.05);
-  color: #f0f4ff;
+  color: #f2f2f2;
 }
 
 .md-break {
@@ -492,16 +464,13 @@ textarea:disabled {
 }
 
 @media (max-width: 900px) {
-  .panel-header { flex-direction: column; align-items: flex-start; }
   .chat-window { max-height: none; }
-  .session-pill { align-self: flex-start; }
   .starter-meta { flex-direction: column; align-items: flex-start; }
 }
 
 @media (max-width: 640px) {
   .app-content { padding: 20px 14px 36px; }
   .panel { border-radius: 16px; }
-  .panel-header { padding: 14px 16px; }
   .chat-window { padding: 18px 16px; }
   .input-meta { flex-direction: column; align-items: flex-start; }
   .input-meta button { width: 100%; justify-content: center; }

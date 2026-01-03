@@ -349,7 +349,14 @@ textarea:disabled {
   transform: translateY(-1px);
 }
 
-.markdown {
+textarea {
+  width: 100%;
+  background: transparent;
+  color: #e9ecf4;
+  border: none;
+  resize: vertical;
+  min-height: 68px;
+  padding: 14px 16px;
   font-size: 15px;
   line-height: 1.7;
   color: #e9ecf4;
@@ -370,6 +377,12 @@ textarea:disabled {
 .markdown li { margin: 4px 0; }
 .markdown strong { color: #f5f5f5; }
 .markdown em { color: #c8c8cf; }
+
+.markdown p { margin: 6px 0; }
+.markdown ul { margin: 6px 0 6px 18px; padding: 0; }
+.markdown li { margin: 4px 0; }
+.markdown strong { color: #f5f8ff; }
+.markdown em { color: #c5d2f1; }
 
 .markdown code {
   background: rgba(255, 255, 255, 0.06);

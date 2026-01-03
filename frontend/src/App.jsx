@@ -1,6 +1,13 @@
 import React, { useEffect, useState, useRef } from 'react';
+import Waves from './Waves.jsx';
+import githubMark from './assets/github-mark.svg';
 
 const API_BASE = '';
+const STARTER_PROMPTS = [
+  'How can you help me?',
+  'What are your capabilities?',
+  'Tell me about yourself'
+];
 
 function sanitizeHtml(str) {
   return str
@@ -162,9 +169,31 @@ function Message({ role, content }) {
   const isAssistant = role === 'assistant';
   return (
     <div className={`message ${isAssistant ? 'assistant' : 'user'}`}>
-      <div className="meta">{isAssistant ? 'AI' : 'You'}</div>
+      <div className="message-meta">{isAssistant ? 'Agent' : 'You'}</div>
       <div className="bubble">
         {isAssistant ? <MarkdownContent content={content} /> : <div className="plaintext">{content}</div>}
+      </div>
+    </div>
+  );
+}
+
+function StarterPrompts({ onSelect }) {
+  return (
+    <div className="starter">
+      <div className="starter-meta">
+        <div className="agent-icon" aria-hidden="true">🤖</div>
+        <div>
+          <p className="starter-eyebrow">Kollmorgen Product Assistant</p>
+          <h2>Hello! How can I help you today?</h2>
+          <p className="starter-caption">Powered by your existing session token. Share this link to pick up where you left off.</p>
+        </div>
+      </div>
+      <div className="starter-prompts">
+        {STARTER_PROMPTS.map((prompt) => (
+          <button key={prompt} type="button" onClick={() => onSelect(prompt)}>
+            {prompt}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -185,11 +214,15 @@ export default function App() {
     }
   }, [messages, loading]);
 
-  async function sendMessage(e) {
-    e.preventDefault();
-    if (!input.trim() || !token) return;
+  const handleStarter = (prompt) => {
+    sendMessage(prompt);
+  };
+
+  async function sendMessage(messageOverride) {
+    const messageText = typeof messageOverride === 'string' ? messageOverride : input;
+    if (!messageText.trim() || !token) return;
     setError('');
-    const userMsg = { role: 'user', content: input, local: true };
+    const userMsg = { role: 'user', content: messageText, local: true };
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setLoading(true);
@@ -213,38 +246,77 @@ export default function App() {
     }
   }
 
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    sendMessage();
+  };
+
   return (
-    <div className="app">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Kollmorgen Product Assistant</p>
-          <h1>Technical chat with product knowledge</h1>
-          <p className="subtitle">Token-based sessions. Share this link to continue on any device.</p>
-        </div>
-      </header>
-      <main>
-        <div className="chat" ref={chatRef}>
-          {messages.map((msg, idx) => (
-            <Message key={idx} role={msg.role} content={msg.content} />
-          ))}
-          {loading && <div className="status">Thinking…</div>}
-          {error && <div className="error">{error}</div>}
-        </div>
-        <form className="input" onSubmit={sendMessage}>
-          <div className="input-field">
-            <textarea
-              value={input}
-              placeholder="Ask about products, integrations, or specifications"
-              onChange={(e) => setInput(e.target.value)}
-              disabled={!token || loading}
-              rows={2}
-            />
+    <div className="app-shell">
+      <div className="bg-glow glow-one" />
+      <div className="bg-glow glow-two" />
+      <div className="grid-overlay" aria-hidden="true" />
+
+      <div className="app-content">
+        <header className="hero">
+          <a
+            className="github-link"
+            href="https://github.com/UnoxyRich/chat"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="View on GitHub"
+          >
+            <img src={githubMark} alt="GitHub" />
+          </a>
+          <div className="badge">Kollmorgen Product Assistant</div>
+        </header>
+
+        <main className="panel">
+          <div className="chat-surface">
+            <div className="chat-window" ref={chatRef} aria-live="polite">
+              {messages.length === 0 && !loading ? (
+                <StarterPrompts onSelect={handleStarter} />
+              ) : (
+                <>
+                  {messages.map((msg, idx) => (
+                    <Message key={idx} role={msg.role} content={msg.content} />
+                  ))}
+                  {loading && (
+                    <div className="message assistant">
+                      <div className="typing">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+              {error && <div className="alert">{error}</div>}
+            </div>
+
+            <form className="chat-form" onSubmit={handleSubmit}>
+              <div className="input-wrapper">
+                <textarea
+                  value={input}
+                  placeholder="Type your message here..."
+                  onChange={(e) => setInput(e.target.value)}
+                  disabled={!token || loading}
+                  rows={2}
+                />
+                <div className="input-meta">
+                  <p>Token-based conversation. Continue on any device with this link.</p>
+                  <button type="submit" disabled={!token || loading}>
+                    {loading ? 'Working…' : 'Send'}
+                  </button>
+                </div>
+              </div>
+            </form>
           </div>
-          <button type="submit" disabled={!token || loading}>
-            {loading ? 'Working…' : 'Send'}
-          </button>
-        </form>
-      </main>
+        </main>
+      </div>
+
+      <Waves paused={false} />
     </div>
   );
 }

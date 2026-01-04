@@ -12,7 +12,8 @@ import {
   listMessages,
   logInteraction,
   listConversations,
-  getRecentIndexingJobs
+  getRecentIndexingJobs,
+  getAllEmbeddings
 } from './db.js';
 import chokidar from 'chokidar';
 import {
@@ -57,35 +58,6 @@ async function loadSystemPrompt() {
   systemPrompt = fs.readFileSync(CONFIG.systemPromptPath, 'utf-8');
 }
 
-function resolveEmbeddingModel(modelIds) {
-  const configuredEmbedding = CONFIG.lmStudio.embeddingModel;
-  const preferredEmbedding =
-    configuredEmbedding === 'text-embedding-3-large'
-      ? 'text-embedding-mxbai-embed-large-v1'
-      : configuredEmbedding;
-  const fallbackEmbedding = 'text-embedding-nomic-embed-text-v1.5';
-
-  const remapped = configuredEmbedding === 'text-embedding-3-large';
-  if (remapped) {
-    console.warn(
-      `[LM Studio] Embedding model ${configuredEmbedding} is deprecated; attempting ${preferredEmbedding} instead.`
-    );
-  }
-
-  if (modelIds.includes(preferredEmbedding)) {
-    return { embeddingModel: preferredEmbedding, fallbackUsed: false, remapped };
-  }
-
-  if (preferredEmbedding === 'text-embedding-mxbai-embed-large-v1' && modelIds.includes(fallbackEmbedding)) {
-    console.warn(
-      `[LM Studio] Embedding model ${preferredEmbedding} not available; falling back to ${fallbackEmbedding}.`
-    );
-    return { embeddingModel: fallbackEmbedding, fallbackUsed: true, remapped };
-  }
-
-  throw new Error(`Embedding model ${preferredEmbedding} not available in LM Studio`);
-}
-
 async function verifyLMStudio(client) {
   let modelIds;
   try {
@@ -100,16 +72,22 @@ async function verifyLMStudio(client) {
     throw new Error(`Chat model ${CONFIG.lmStudio.chatModel} not available in LM Studio`);
   }
 
-  const { embeddingModel, fallbackUsed, remapped } = resolveEmbeddingModel(modelIds);
-  CONFIG.lmStudio.embeddingModel = embeddingModel;
-  return { embeddingModel, fallbackUsed, remapped };
+  if (!modelIds.includes(CONFIG.lmStudio.embeddingModel)) {
+    throw new Error(
+      `Embedding model ${CONFIG.lmStudio.embeddingModel} not available in LM Studio. ` +
+        'Verify it is downloaded and listed under /v1/models.'
+    );
+  }
+
+  console.log(`[LM Studio] Embedding model ready: ${CONFIG.lmStudio.embeddingModel}`);
+  return { embeddingModel: CONFIG.lmStudio.embeddingModel };
 }
 
 async function startup() {
   await loadSystemPrompt();
   validateLMStudioEndpoint();
   openaiClient = createOpenAIClient();
-  const { embeddingModel, fallbackUsed, remapped } = await verifyLMStudio(openaiClient);
+  const { embeddingModel } = await verifyLMStudio(openaiClient);
   await warmUpModels(openaiClient);
   indexingState.state = 'indexing';
   indexingState.currentFile = 'initial-scan';
@@ -120,17 +98,16 @@ async function startup() {
       `No PDFs found in ${CONFIG.filesDir}. Place the knowledge base PDFs there so embeddings can be generated.`
     );
   }
+  const embeddedChunks = getAllEmbeddings(db).length;
+  if (embeddedChunks === 0) {
+    throw new Error('No PDF chunks were embedded. Confirm the PDFs contain text and retry ingestion.');
+  }
   indexingState.lastResult = { filename: 'initial-scan', status: 'completed', results, completedAt: Date.now() };
   indexingState.state = 'idle';
   indexingState.currentFile = null;
   console.log('[LLM] Chat model pinned:', CONFIG.lmStudio.chatModel);
   console.log('[LLM] Embedding model pinned:', embeddingModel);
-  if (remapped) {
-    console.log('[LLM] Embedding model remapped from text-embedding-3-large to preferred option.');
-  }
-  if (fallbackUsed) {
-    console.log('[LLM] Embedding model fallback in use; update LM Studio to restore preferred model.');
-  }
+  console.log(`[RAG] Embedded chunks confirmed: ${embeddedChunks}`);
   console.log('[RAG] Embedding engine ready');
 }
 

@@ -14,7 +14,7 @@ export const CONFIG = {
   lmStudio: {
     baseURL: process.env.LM_STUDIO_BASE_URL || 'http://localhost:1234/v1',
     chatModel: process.env.LM_STUDIO_CHAT_MODEL || 'qwen/qwen3-vl-8b',
-    embeddingModel: process.env.LM_STUDIO_EMBEDDING_MODEL || 'text-embedding-mxbai-embed-large-v1'
+    embeddingModel: process.env.LM_STUDIO_EMBEDDING_MODEL || 'text-embedding-nomic-embed-text-v1.5'
   },
   retrieval: {
     chunkSize: 800,

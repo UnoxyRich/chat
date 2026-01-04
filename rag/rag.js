@@ -190,7 +190,23 @@ export async function retrieveContext(db, client, query, requestId = 'retrieve-u
   const queryEmbedding = (await embedBatch(client, [query], requestId))[0];
   const scored = rows.map((row) => {
     const vector = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
-    const score = cosineSimilarity(queryEmbedding, Array.from(vector));
+    let score = cosineSimilarity(queryEmbedding, Array.from(vector));
+    if (!Number.isFinite(score)) {
+      console.warn(
+        JSON.stringify(
+          {
+            event: 'similarity_score_nan',
+            requestId,
+            filename: row.filename,
+            chunkIndex: row.chunk_index,
+            message: 'NaN score encountered; substituting zero'
+          },
+          null,
+          2
+        )
+      );
+      score = 0;
+    }
     return {
       score,
       filename: row.filename,
@@ -200,8 +216,27 @@ export async function retrieveContext(db, client, query, requestId = 'retrieve-u
   });
 
   const top = scored.sort((a, b) => b.score - a.score).slice(0, CONFIG.retrieval.topK);
+  console.log(
+    JSON.stringify(
+      {
+        event: 'similarity_top_scores',
+        requestId,
+        scores: top.map((item) => ({
+          filename: item.filename,
+          chunkIndex: item.chunkIndex,
+          score: item.score
+        }))
+      },
+      null,
+      2
+    )
+  );
+
   const maxScore = top.length ? top[0].score : null;
-  const filtered = top.filter((item) => item.score >= CONFIG.retrieval.minScore);
+  const minTopScore = top.length ? top[top.length - 1].score : null;
+  const minScore = Number.isFinite(CONFIG.retrieval.minScore) ? CONFIG.retrieval.minScore : 0;
+  const filtered = top.filter((item) => item.score >= minScore);
+  const chosen = filtered.length ? filtered : top;
 
   console.log(
     JSON.stringify(
@@ -212,21 +247,38 @@ export async function retrieveContext(db, client, query, requestId = 'retrieve-u
         topK: CONFIG.retrieval.topK,
         returnedTop: top.length,
         filteredHits: filtered.length,
-        maxScore
+        maxScore,
+        minTopScore,
+        threshold: minScore
       },
       null,
       2
     )
   );
 
-  const contextChunks = filtered.map((item) => ({
+  if (filtered.length === 0 && top.length > 0) {
+    console.warn(
+      JSON.stringify(
+        {
+          event: 'RAG_FILTER_DROPPED_ALL_RESULTS',
+          requestId,
+          threshold: minScore,
+          scores: top.map((item) => item.score)
+        },
+        null,
+        2
+      )
+    );
+  }
+
+  const contextChunks = chosen.map((item) => ({
     text: `Source: ${item.filename} [chunk ${item.chunkIndex}]\n${item.text}`,
     filename: item.filename,
     chunkIndex: item.chunkIndex,
     score: item.score
   }));
 
-  return { contextChunks, sources: filtered, maxScore };
+  return { contextChunks, sources: chosen, maxScore };
 }
 
 export function validateLMStudioEndpoint() {

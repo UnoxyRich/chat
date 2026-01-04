@@ -11,10 +11,10 @@ import {
   addMessage,
   listMessages,
   logInteraction,
-  getRecentIndexingJobs,
-  resetRagData
+  getRecentIndexingJobs
 } from './db.js';
-import { ingestDocuments, retrieveContext, createOpenAIClient } from '../rag/rag.js';
+import chokidar from 'chokidar';
+import { ingestDocuments, ingestDocument, retrieveContext, createOpenAIClient } from '../rag/rag.js';
 
 const app = express();
 app.use(cors());
@@ -27,13 +27,10 @@ ensureDirectories();
 const db = initDatabase();
 let systemPrompt = '';
 let openaiClient = null;
-const ragState = {
-  state: 'indexing',
+const pendingFiles = new Set();
+const indexingState = {
+  state: 'idle',
   currentFile: null,
-  totalFiles: 0,
-  processedFiles: 0,
-  totalChunks: 0,
-  error: null,
   lastResult: null
 };
 
@@ -119,13 +116,19 @@ async function startup() {
   await loadSystemPrompt();
   openaiClient = createOpenAIClient();
   await verifyLMStudio(openaiClient);
-  await rebuildRagIndex();
+  indexingState.state = 'indexing';
+  indexingState.currentFile = 'initial-scan';
+  const results = await ingestDocuments(db, openaiClient);
+  indexingState.lastResult = { filename: 'initial-scan', status: 'completed', results, completedAt: Date.now() };
+  indexingState.state = 'idle';
+  indexingState.currentFile = null;
   console.log(`Using chat model ${CONFIG.lmStudio.chatModel} with context window ${CONFIG.contextWindow}.`);
   console.log(`Using embedding model ${CONFIG.lmStudio.embeddingModel}.`);
 }
 
 startup()
   .then(() => {
+    startFileWatcher();
     app.listen(CONFIG.port, () => {
       console.log(`Backend running on port ${CONFIG.port}`);
     });
@@ -151,6 +154,43 @@ function generateToken() {
   return crypto.randomBytes(24).toString('base64url');
 }
 
+let processingQueue = false;
+
+async function processQueue() {
+  if (processingQueue) return;
+  processingQueue = true;
+  while (pendingFiles.size > 0) {
+    const [next] = pendingFiles;
+    pendingFiles.delete(next);
+    indexingState.state = 'indexing';
+    indexingState.currentFile = next;
+    try {
+      const result = await ingestDocument(db, openaiClient, next);
+      indexingState.lastResult = { ...result, completedAt: Date.now() };
+      console.log(`Indexed ${next}: ${result.status}`);
+    } catch (err) {
+      indexingState.lastResult = { filename: next, status: 'error', error: err.message, completedAt: Date.now() };
+      console.error(`Failed to index ${next}:`, err.message);
+    }
+    indexingState.state = 'idle';
+    indexingState.currentFile = null;
+  }
+  processingQueue = false;
+}
+
+function enqueueFile(filename) {
+  if (!filename.toLowerCase().endsWith('.pdf')) return;
+  pendingFiles.add(path.basename(filename));
+  processQueue();
+}
+
+function startFileWatcher() {
+  const watcher = chokidar.watch(CONFIG.filesDir, { ignoreInitial: true, depth: 0 });
+  watcher.on('add', enqueueFile);
+  watcher.on('change', enqueueFile);
+  console.log(`Watching ${CONFIG.filesDir} for new or updated PDFs...`);
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
@@ -163,7 +203,10 @@ app.post('/api/token', (req, res) => {
 
 app.get('/api/indexing/status', (req, res) => {
   res.json({
-    ...ragState,
+    state: indexingState.state,
+    currentFile: indexingState.currentFile,
+    queue: Array.from(pendingFiles),
+    lastResult: indexingState.lastResult,
     recentJobs: getRecentIndexingJobs(db, 15)
   });
 });
@@ -183,23 +226,7 @@ app.post('/api/chat', async (req, res) => {
   const history = listMessages(db, token);
   const userMessage = addMessage(db, token, 'user', message);
   try {
-    if (ragState.state === 'indexing') {
-      return res.status(503).json({ error: 'Knowledge base is still indexing. Please try again shortly.' });
-    }
-
-    if (ragState.state === 'error' || ragState.totalChunks === 0) {
-      const replyText =
-        'No documents are available in the knowledge base right now. Please add PDFs to /files-for-uploading and restart the server to rebuild the index.';
-      const aiMessage = addMessage(db, token, 'assistant', replyText);
-      logInteraction(db, token, userMessage.id, aiMessage.id, {
-        ip: req.ip,
-        userAgent: req.get('user-agent'),
-        ragSources: JSON.stringify([])
-      });
-      return res.json({ reply: replyText, sources: [] });
-    }
-
-    const { contextChunks, sources } = await retrieveContext(db, openaiClient, message);
+    const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message);
 
     const systemTokens = estimateTokens(systemPrompt);
     const userTokens = estimateTokens(message);
@@ -241,6 +268,20 @@ app.post('/api/chat', async (req, res) => {
     const finalHistory = trimmedHistory.map(({ tokens, ...rest }) => rest);
     const finalContextText = selectedContext.map((chunk) => chunk.text).join('\n\n');
     const finalSources = sources.slice(0, selectedContext.length);
+
+    if (selectedContext.length === 0) {
+      const noDataReply =
+        maxScore === null
+          ? 'I could not find any indexed documents yet. Please add the relevant PDFs to /files-for-uploading so I can help.'
+          : 'I could not find relevant information for that request in the indexed PDFs. Please verify the product name or upload the corresponding documentation.';
+      const aiMessage = addMessage(db, token, 'assistant', noDataReply);
+      logInteraction(db, token, userMessage.id, aiMessage.id, {
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+        ragSources: JSON.stringify([])
+      });
+      return res.json({ reply: noDataReply, sources: [] });
+    }
 
     console.log(
       JSON.stringify(

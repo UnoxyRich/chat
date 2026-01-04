@@ -19,7 +19,8 @@ export const CONFIG = {
   retrieval: {
     chunkSize: 800,
     chunkOverlap: 100,
-    topK: 5
+    topK: 5,
+    minScore: parseFloat(process.env.RETRIEVAL_MIN_SCORE || '0.25')
   }
 };
 

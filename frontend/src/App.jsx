@@ -203,7 +203,7 @@ export default function App() {
   const { token, messages, setMessages, loading, setLoading } = useConversation();
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
-  const [indexingStatus, setIndexingStatus] = useState({ state: 'indexing' });
+  const [indexingStatus, setIndexingStatus] = useState({ state: 'idle', queue: [] });
   const chatRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const hasMessage = input.trim().length > 0;
@@ -213,6 +213,30 @@ export default function App() {
     const el = chatRef.current;
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
   }, [messages, loading, autoScroll]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadStatus() {
+      try {
+        const res = await fetch(`${API_BASE}/api/indexing/status`);
+        const data = await res.json();
+        if (!cancelled) {
+          setIndexingStatus(data);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setIndexingStatus((prev) => ({ ...prev, error: err.message }));
+        }
+      }
+    }
+
+    loadStatus();
+    const interval = setInterval(loadStatus, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -282,16 +306,8 @@ export default function App() {
     }
   };
 
-  const handleScroll = () => {
-    if (!chatRef.current) return;
-    const el = chatRef.current;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setAutoScroll(distanceFromBottom < 80);
-  };
-
-  const showIndexing = indexingStatus.state === 'indexing';
-  const isError = indexingStatus.state === 'error';
-  const currentLabel = indexingStatus.currentFile;
+  const showIndexing = indexingStatus.state === 'indexing' || (indexingStatus.queue || []).length > 0;
+  const currentLabel = indexingStatus.currentFile === 'initial-scan' ? 'Preparing knowledge base' : indexingStatus.currentFile;
 
   return (
     <div className="app-shell">
@@ -311,19 +327,12 @@ export default function App() {
                 <>
                   <span className="status-dot active" />
                   <div>
-                    <div className="status-title">Indexing documents…</div>
+                    <div className="status-title">Indexing new documents…</div>
                     <div className="status-caption">
-                      {currentLabel ? `Building: ${currentLabel}` : 'Rebuilding knowledge base at startup'}
-                    </div>
-                  </div>
-                </>
-              ) : isError ? (
-                <>
-                  <span className="status-dot" />
-                  <div>
-                    <div className="status-title">Knowledge base unavailable</div>
-                    <div className="status-caption">
-                      {indexingStatus.error || 'No documents were successfully indexed. Add PDFs and restart.'}
+                      {currentLabel ? `Working on ${currentLabel}` : 'Queueing detected uploads'}
+                      {indexingStatus.queue && indexingStatus.queue.length > 0
+                        ? ` • Next: ${indexingStatus.queue.join(', ')}`
+                        : ''}
                     </div>
                   </div>
                 </>
@@ -333,13 +342,13 @@ export default function App() {
                   <div>
                     <div className="status-title">Knowledge base ready</div>
                     <div className="status-caption">
-                      {`Indexed ${indexingStatus.processedFiles || 0} files (${indexingStatus.totalChunks || 0} chunks)`}
+                      Watching for new PDFs in /files-for-uploading
                     </div>
                   </div>
                 </>
               )}
             </div>
-            <div className="chat-window" ref={chatRef} aria-live="polite" onScroll={handleScroll}>
+            <div className="chat-window" ref={chatRef} aria-live="polite">
               {messages.length === 0 && !loading ? (
                 <StarterPrompts onSelect={handleStarter} />
               ) : (

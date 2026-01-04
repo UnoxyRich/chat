@@ -8,6 +8,7 @@ import {
   replaceDocumentMetadata,
   storeEmbeddingChunk,
   getAllEmbeddings,
+  getDocumentByFilename,
   startIndexingJob,
   completeIndexingJob,
   failIndexingJob
@@ -45,6 +46,10 @@ export async function ingestDocument(db, client, filename) {
   const stat = fs.statSync(fullPath);
   const buffer = fs.readFileSync(fullPath);
   const hash = hashBuffer(buffer);
+  const existing = getDocumentByFilename(db, filename);
+  if (existing && existing.hash === hash && existing.mtime === stat.mtimeMs) {
+    return { filename, status: 'skipped' };
+  }
 
   const jobId = startIndexingJob(db, filename, stat.mtimeMs, hash);
   try {
@@ -63,28 +68,24 @@ export async function ingestDocument(db, client, filename) {
   }
 }
 
-export async function ingestDocuments(db, client, { onFileStart } = {}) {
+export async function ingestDocuments(db, client) {
   const files = fs.readdirSync(CONFIG.filesDir).filter((file) => file.toLowerCase().endsWith('.pdf'));
   const results = [];
-  let totalChunks = 0;
-  let processedFiles = 0;
+  let hasError = false;
   for (const file of files) {
-    if (onFileStart) {
-      onFileStart(file);
-    }
     try {
       const result = await ingestDocument(db, client, file);
       results.push(result);
-      if (result.status === 'indexed') {
-        processedFiles += 1;
-        totalChunks += result.chunks || 0;
-      }
     } catch (err) {
       results.push({ filename: file, status: 'error', error: err.message });
+      hasError = true;
     }
   }
-  const errors = results.filter((r) => r.status === 'error').length;
-  return { results, totalFiles: files.length, processedFiles, totalChunks, errors };
+  if (hasError) {
+    const failed = results.filter((r) => r.status === 'error').map((r) => r.filename).join(', ');
+    throw new Error(`Failed to ingest: ${failed}`);
+  }
+  return results;
 }
 
 function cosineSimilarity(a, b) {
@@ -100,8 +101,12 @@ function cosineSimilarity(a, b) {
 }
 
 export async function retrieveContext(db, client, query) {
-  const queryEmbedding = (await embedBatch(client, [query]))[0];
   const rows = getAllEmbeddings(db);
+  if (!rows.length) {
+    return { contextChunks: [], sources: [], maxScore: null };
+  }
+
+  const queryEmbedding = (await embedBatch(client, [query]))[0];
   const scored = rows.map((row) => {
     const vector = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
     const score = cosineSimilarity(queryEmbedding, Array.from(vector));
@@ -112,14 +117,19 @@ export async function retrieveContext(db, client, query) {
       text: row.text
     };
   });
+
   const top = scored.sort((a, b) => b.score - a.score).slice(0, CONFIG.retrieval.topK);
-  const contextChunks = top.map((item) => ({
+  const maxScore = top.length ? top[0].score : null;
+  const filtered = top.filter((item) => item.score >= CONFIG.retrieval.minScore);
+
+  const contextChunks = filtered.map((item) => ({
     text: `Source: ${item.filename} [chunk ${item.chunkIndex}]\n${item.text}`,
     filename: item.filename,
     chunkIndex: item.chunkIndex,
     score: item.score
   }));
-  return { contextChunks, sources: top };
+
+  return { contextChunks, sources: filtered, maxScore };
 }
 
 export function createOpenAIClient() {

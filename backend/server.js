@@ -43,6 +43,10 @@ const indexingState = {
 };
 
 const TOKEN_ESTIMATE_DIVISOR = 4;
+const CONTEXT_TOKEN_BUDGET = 20000;
+const PROMPT_TOKEN_BUDGET = 30000;
+const MAX_COMPLETION_ATTEMPTS = 2;
+const MIN_RETRY_TOKEN_BUFFER = 1024;
 
 function estimateTokens(text) {
   if (!text) return 0;
@@ -174,6 +178,66 @@ function buildMessages(context, userInput, language) {
   return messages;
 }
 
+function analyzeCompletion(completion) {
+  const choice = completion?.choices?.[0];
+  const finishReason = choice?.finish_reason || choice?.finishReason;
+  const content = choice?.message?.content ? choice.message.content.trim() : '';
+  const hasContent = Boolean(content);
+  const invalidFinishReason = finishReason && finishReason !== 'stop';
+  const missingFinishReason = !finishReason;
+  return {
+    content,
+    finishReason,
+    invalid: !hasContent || invalidFinishReason || missingFinishReason
+  };
+}
+
+async function generateCompletionWithRecovery(messages, initialMaxTokens) {
+  let attempt = 0;
+  let maxTokens = initialMaxTokens;
+  let lastError = null;
+
+  while (attempt < MAX_COMPLETION_ATTEMPTS) {
+    try {
+      const completion = await openaiClient.chat.completions.create({
+        model: CONFIG.lmStudio.chatModel,
+        messages,
+        max_tokens: maxTokens
+      });
+      const { content, finishReason, invalid } = analyzeCompletion(completion);
+      if (!invalid) {
+        return { replyText: content, finishReason };
+      }
+      lastError = new Error(
+        `LLM returned an invalid response (finish_reason=${finishReason || 'none'}, length=${content.length})`
+      );
+    } catch (err) {
+      lastError = err;
+    }
+
+    attempt += 1;
+    if (attempt >= MAX_COMPLETION_ATTEMPTS) {
+      break;
+    }
+
+    maxTokens = Math.min(
+      CONFIG.outputTokenCap,
+      Math.max(Math.floor(maxTokens * 2), maxTokens + MIN_RETRY_TOKEN_BUFFER)
+    );
+    console.warn(
+      `[LLM] Regenerating response (attempt ${attempt + 1}) with max_tokens=${maxTokens} after issue: ${lastError?.message}`
+    );
+  }
+
+  throw lastError || new Error('LLM response was empty or invalid after retries');
+}
+
+function buildFallbackReply(language) {
+  return language === 'zh'
+    ? '我暂时无法生成完整的回答。请告诉我具体的产品名称、型号或提供相关PDF，我会立即再次查找。'
+    : 'I ran into an issue generating a complete answer. Please share the exact product name, model, or upload the related PDF so I can try again right away.';
+}
+
 function generateToken() {
   return crypto.randomBytes(24).toString('base64url');
 }
@@ -277,9 +341,6 @@ app.post('/api/chat', async (req, res) => {
     const userTokens = estimateTokens(message);
     let selectedContext = contextChunks.map((chunk) => ({ ...chunk, tokens: estimateTokens(chunk.text) }));
 
-    const CONTEXT_TOKEN_BUDGET = 2000;
-    const PROMPT_TOKEN_BUDGET = 3000;
-
     const computeReserved = (contextMsgs) => {
       const contextTokens = contextMsgs.reduce((sum, chunk) => sum + chunk.tokens, 0);
       return systemTokens + userTokens + contextTokens;
@@ -309,8 +370,8 @@ app.post('/api/chat', async (req, res) => {
     if (selectedContext.length === 0) {
       const noDataReply =
         language === 'zh'
-          ? '没有找到相关的文档内容。请提供具体的产品名称或上传对应的PDF以便我查阅。'
-          : 'I could not find relevant information in the indexed documents. Please provide the exact product name or upload the related PDF.';
+          ? '没有找到相关的文档内容。请告诉我具体的产品名称或型号，或上传对应的PDF文件，我可以立即为你查阅。你希望我查看哪款产品？'
+          : 'I could not find relevant information in the indexed documents. Which exact product or document should I check? Please share the product name/model or upload the related PDF so I can help right away.';
       const aiMessage = addMessage(db, token, 'assistant', noDataReply);
       logInteraction(db, token, userMessage.id, aiMessage.id, {
         ip: req.ip,
@@ -336,12 +397,7 @@ app.post('/api/chat', async (req, res) => {
     );
 
     const messages = buildMessages(finalContextText, message, language);
-    const completion = await openaiClient.chat.completions.create({
-      model: CONFIG.lmStudio.chatModel,
-      messages,
-      max_tokens: maxGenerationTokens
-    });
-    const replyText = completion.choices[0].message.content;
+    const { replyText } = await generateCompletionWithRecovery(messages, maxGenerationTokens);
     const aiMessage = addMessage(db, token, 'assistant', replyText);
     logInteraction(db, token, userMessage.id, aiMessage.id, {
       ip: req.ip,
@@ -351,7 +407,14 @@ app.post('/api/chat', async (req, res) => {
     res.json({ reply: replyText, sources: finalSources });
   } catch (err) {
     console.error('Chat error', err.message);
-    res.status(500).json({ error: 'Chat failed', details: err.message });
+    const fallbackReply = buildFallbackReply(language);
+    const aiMessage = addMessage(db, token, 'assistant', fallbackReply);
+    logInteraction(db, token, userMessage.id, aiMessage.id, {
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      ragSources: JSON.stringify([])
+    });
+    res.status(200).json({ reply: fallbackReply, sources: [] });
   }
 });
 

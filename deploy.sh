@@ -20,7 +20,8 @@ BACKEND_LOG="$LOG_DIR/backend.log"
 PORT="${PORT:-3000}"
 LM_STUDIO_BASE_URL="${LM_STUDIO_BASE_URL:-http://localhost:1234/v1}"
 LM_STUDIO_CHAT_MODEL="${LM_STUDIO_CHAT_MODEL:-qwen/qwen3-vl-8b}"
-LM_STUDIO_EMBEDDING_MODEL="${LM_STUDIO_EMBEDDING_MODEL:-text-embedding-3-large}"
+EMBEDDING_MODEL="${EMBEDDING_MODEL:-text-embedding-nomic-embed-text-v1.5}"
+LM_STUDIO_EMBEDDING_MODEL="${LM_STUDIO_EMBEDDING_MODEL:-$EMBEDDING_MODEL}"
 
 status() {
   echo "[deploy] $*"
@@ -97,6 +98,7 @@ export PORT
 export LM_STUDIO_BASE_URL
 export LM_STUDIO_CHAT_MODEL
 export LM_STUDIO_EMBEDDING_MODEL
+export EMBEDDING_MODEL
 export NODE_ENV=production
 (
   cd "$ROOT_DIR" || exit 1

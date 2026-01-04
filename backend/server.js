@@ -14,7 +14,14 @@ import {
   getRecentIndexingJobs
 } from './db.js';
 import chokidar from 'chokidar';
-import { ingestDocuments, ingestDocument, retrieveContext, createOpenAIClient } from '../rag/rag.js';
+import {
+  ingestDocuments,
+  ingestDocument,
+  retrieveContext,
+  createOpenAIClient,
+  warmUpModels,
+  validateLMStudioEndpoint
+} from '../rag/rag.js';
 
 const app = express();
 app.use(cors());
@@ -54,14 +61,7 @@ async function verifyLMStudio(client) {
     }
 
     if (!modelIds.includes(CONFIG.lmStudio.embeddingModel)) {
-      const preferredEmbedding = modelIds.find((id) => id !== CONFIG.lmStudio.chatModel && id.toLowerCase().includes('embed'));
-      const alternative = preferredEmbedding || modelIds.find((id) => id !== CONFIG.lmStudio.chatModel) || CONFIG.lmStudio.chatModel;
-      CONFIG.lmStudio.embeddingModel = alternative;
-      console.warn(
-        `Configured embedding model not found. Using ${CONFIG.lmStudio.embeddingModel}${
-          alternative === CONFIG.lmStudio.chatModel ? ' (chat model fallback)' : ''
-        }.`
-      );
+      throw new Error(`Configured embedding model ${CONFIG.lmStudio.embeddingModel} not found in LM Studio.`);
     }
   } catch (err) {
     console.error('Failed to connect to LM Studio', err.message);
@@ -114,16 +114,19 @@ async function rebuildRagIndex() {
 
 async function startup() {
   await loadSystemPrompt();
+  validateLMStudioEndpoint();
   openaiClient = createOpenAIClient();
   await verifyLMStudio(openaiClient);
+  await warmUpModels(openaiClient);
   indexingState.state = 'indexing';
   indexingState.currentFile = 'initial-scan';
   const results = await ingestDocuments(db, openaiClient);
   indexingState.lastResult = { filename: 'initial-scan', status: 'completed', results, completedAt: Date.now() };
   indexingState.state = 'idle';
   indexingState.currentFile = null;
-  console.log(`Using chat model ${CONFIG.lmStudio.chatModel} with context window ${CONFIG.contextWindow}.`);
-  console.log(`Using embedding model ${CONFIG.lmStudio.embeddingModel}.`);
+  console.log('[LLM] Chat model pinned:', CONFIG.lmStudio.chatModel);
+  console.log('[LLM] Embedding model pinned:', CONFIG.lmStudio.embeddingModel);
+  console.log('[RAG] Embedding engine ready');
 }
 
 startup()

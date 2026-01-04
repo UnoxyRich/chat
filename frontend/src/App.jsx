@@ -262,6 +262,30 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function loadStatus() {
+      try {
+        const res = await fetch(`${API_BASE}/api/indexing/status`);
+        const data = await res.json();
+        if (!cancelled) {
+          setIndexingStatus(data);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setIndexingStatus((prev) => ({ ...prev, error: err.message }));
+        }
+      }
+    }
+
+    loadStatus();
+    const interval = setInterval(loadStatus, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
   const handleStarter = (prompt) => {
     sendMessage(prompt);
   };

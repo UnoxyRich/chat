@@ -32,10 +32,37 @@ function splitText(text, chunkSize, chunkOverlap) {
   return chunks;
 }
 
+let embeddingClientRef = null;
+let embeddingQueue = Promise.resolve();
+let embeddingWarmupPromise = null;
+let chatWarmupPromise = null;
+
+function queueEmbeddingTask(task) {
+  const run = embeddingQueue.then(() => task());
+  embeddingQueue = run.catch(() => {});
+  return run;
+}
+
+function ensureSingleEmbeddingClient(client) {
+  if (embeddingClientRef && embeddingClientRef !== client) {
+    console.warn('[RAG] Embedding client switched after initialization; reusing the first instance.');
+    return embeddingClientRef;
+  }
+  embeddingClientRef = client;
+  return embeddingClientRef;
+}
+
 async function embedBatch(client, texts) {
   const embeddingModel = CONFIG.lmStudio.embeddingModel;
-  const response = await client.embeddings.create({ model: embeddingModel, input: texts });
-  return response.data.map((item) => item.embedding);
+  const stableClient = ensureSingleEmbeddingClient(client);
+  return queueEmbeddingTask(async () => {
+    try {
+      const response = await stableClient.embeddings.create({ model: embeddingModel, input: texts });
+      return response.data.map((item) => item.embedding);
+    } catch (err) {
+      throw new Error(`Embedding request failed: ${err.message}`);
+    }
+  });
 }
 
 export async function ingestDocument(db, client, filename) {
@@ -132,6 +159,59 @@ export async function retrieveContext(db, client, query) {
   return { contextChunks, sources: filtered, maxScore };
 }
 
+export function validateLMStudioEndpoint() {
+  const parsed = new URL(CONFIG.lmStudio.baseURL);
+  if (!parsed.hostname) {
+    throw new Error('LM Studio baseURL must include a hostname');
+  }
+  if (!parsed.port) {
+    throw new Error('LM Studio baseURL must include an explicit port');
+  }
+  if (!['localhost', '127.0.0.1'].includes(parsed.hostname)) {
+    console.warn(
+      `[LM Studio] WARNING: baseURL ${parsed.origin} is not local. Ensure LM Studio is not exposed beyond the host machine.`
+    );
+  }
+  return parsed;
+}
+
 export function createOpenAIClient() {
-  return new OpenAI({ baseURL: CONFIG.lmStudio.baseURL, apiKey: process.env.LM_STUDIO_API_KEY || 'not-needed' });
+  const validated = validateLMStudioEndpoint();
+  return new OpenAI({ baseURL: validated.toString(), apiKey: process.env.LM_STUDIO_API_KEY || 'not-needed' });
+}
+
+export async function warmUpModels(client) {
+  const warmupLabel = '[LM Studio] Warm-up';
+  if (!embeddingWarmupPromise) {
+    embeddingWarmupPromise = queueEmbeddingTask(async () => {
+      console.log(`${warmupLabel} embedding start`);
+      try {
+        await ensureSingleEmbeddingClient(client).embeddings.create({
+          model: CONFIG.lmStudio.embeddingModel,
+          input: 'warmup'
+        });
+        console.log(`${warmupLabel} embedding complete`);
+      } catch (err) {
+        console.error(`${warmupLabel} embedding failed`, err.message);
+        throw err;
+      }
+    });
+  }
+  if (!chatWarmupPromise) {
+    chatWarmupPromise = (async () => {
+      console.log(`${warmupLabel} chat start`);
+      try {
+        await client.chat.completions.create({
+          model: CONFIG.lmStudio.chatModel,
+          messages: [{ role: 'system', content: 'warmup' }, { role: 'user', content: 'warmup' }],
+          max_tokens: 1
+        });
+        console.log(`${warmupLabel} chat complete`);
+      } catch (err) {
+        console.error(`${warmupLabel} chat failed`, err.message);
+        throw err;
+      }
+    })();
+  }
+  await Promise.all([embeddingWarmupPromise, chatWarmupPromise]);
 }

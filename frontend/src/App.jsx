@@ -130,29 +130,32 @@ function useConversation() {
   const [token, setToken] = useState(null);
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [conversations, setConversations] = useState([]);
+  const [initializing, setInitializing] = useState(true);
 
-  useEffect(() => {
-    async function initToken() {
-      const params = new URLSearchParams(window.location.search);
-      const existing = params.get('token') || localStorage.getItem('conversation_token');
-      if (existing) {
-        setToken(existing);
-        await loadConversation(existing);
-        return;
-      }
-      const res = await fetch(`${API_BASE}/api/token`, { method: 'POST' });
+  const persistToken = (tok) => {
+    setToken(tok);
+    localStorage.setItem('conversation_token', tok);
+    const url = new URL(window.location.href);
+    url.searchParams.set('token', tok);
+    window.history.replaceState({}, '', url.toString());
+  };
+
+  const refreshConversations = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/conversations`);
       const data = await res.json();
-      setToken(data.token);
-      localStorage.setItem('conversation_token', data.token);
-      const url = new URL(window.location.href);
-      url.searchParams.set('token', data.token);
-      window.history.replaceState({}, '', url.toString());
+      setConversations(data.conversations || []);
+      return data.conversations || [];
+    } catch (err) {
+      console.error('Failed to load conversations', err);
+      return [];
     }
-    initToken();
-  }, []);
+  };
 
   async function loadConversation(tok) {
     setLoading(true);
+    setMessages([]);
     try {
       const res = await fetch(`${API_BASE}/api/conversation/${tok}`);
       const data = await res.json();
@@ -162,7 +165,66 @@ function useConversation() {
     }
   }
 
-  return { token, messages, setMessages, loading, setLoading, loadConversation };
+  const createNewConversation = async () => {
+    const res = await fetch(`${API_BASE}/api/token`, { method: 'POST' });
+    const data = await res.json();
+    persistToken(data.token);
+    setMessages([]);
+    await refreshConversations();
+    return data.token;
+  };
+
+  const selectConversation = async (tok) => {
+    if (!tok) return;
+    persistToken(tok);
+    await loadConversation(tok);
+    await refreshConversations();
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    async function initToken() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const preferred = params.get('token') || localStorage.getItem('conversation_token');
+        const currentList = await refreshConversations();
+        let activeToken = preferred || (currentList[0] && currentList[0].id);
+        if (!activeToken) {
+          activeToken = await createNewConversation();
+          await loadConversation(activeToken);
+        } else {
+          persistToken(activeToken);
+          await loadConversation(activeToken);
+          await refreshConversations();
+        }
+        persistToken(activeToken);
+      } catch (err) {
+        console.error('Failed to initialize conversation', err);
+      } finally {
+        if (!cancelled) {
+          setInitializing(false);
+        }
+      }
+    }
+    initToken();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return {
+    token,
+    messages,
+    setMessages,
+    loading,
+    setLoading,
+    loadConversation,
+    conversations,
+    refreshConversations,
+    createNewConversation,
+    selectConversation,
+    initializing
+  };
 }
 
 function Message({ role, content }) {
@@ -199,8 +261,75 @@ function StarterPrompts({ onSelect }) {
   );
 }
 
+function formatTimestamp(ts) {
+  if (!ts) return 'Just now';
+  const date = new Date(ts);
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  });
+}
+
+function conversationPreview(conv) {
+  const preview = conv.first_user_message || conv.last_message;
+  if (!preview) return 'New conversation';
+  return preview.length > 80 ? `${preview.slice(0, 80)}…` : preview;
+}
+
+function ConversationMenu({ conversations, activeToken, onSelect, onNew }) {
+  return (
+    <aside className="chat-menu">
+      <div className="menu-header">
+        <div>
+          <p className="menu-label">Conversations</p>
+          <p className="menu-hint">
+            {conversations.length ? 'Select a chat to restore its context.' : 'Start a new chat to begin.'}
+          </p>
+        </div>
+        <button type="button" className="new-chat-btn" onClick={onNew}>
+          New Chat
+        </button>
+      </div>
+      <div className="menu-list">
+        {conversations.length === 0 ? (
+          <div className="menu-empty">No chats yet. Start a new one to begin.</div>
+        ) : (
+          conversations.map((conv) => (
+            <button
+              key={conv.id}
+              type="button"
+              className={`menu-item ${conv.id === activeToken ? 'active' : ''}`}
+              onClick={() => onSelect(conv.id)}
+            >
+              <div className="menu-title">{conversationPreview(conv)}</div>
+              <div className="menu-meta">
+                <span className="menu-time">{formatTimestamp(conv.last_active_at || conv.created_at)}</span>
+              </div>
+            </button>
+          ))
+        )}
+      </div>
+    </aside>
+  );
+}
+
 export default function App() {
-  const { token, messages, setMessages, loading, setLoading } = useConversation();
+  const {
+    token,
+    messages,
+    setMessages,
+    loading,
+    setLoading,
+    loadConversation,
+    conversations,
+    refreshConversations,
+    createNewConversation,
+    selectConversation,
+    initializing
+  } = useConversation();
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
   const [indexingStatus, setIndexingStatus] = useState({ state: 'idle', queue: [] });
@@ -213,126 +342,6 @@ export default function App() {
     const el = chatRef.current;
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
   }, [messages, loading, autoScroll]);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadStatus() {
-      try {
-        const res = await fetch(`${API_BASE}/api/indexing/status`);
-        const data = await res.json();
-        if (!cancelled) {
-          setIndexingStatus(data);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setIndexingStatus((prev) => ({ ...prev, error: err.message }));
-        }
-      }
-    }
-
-    loadStatus();
-    const interval = setInterval(loadStatus, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadStatus() {
-      try {
-        const res = await fetch(`${API_BASE}/api/indexing/status`);
-        const data = await res.json();
-        if (!cancelled) {
-          setIndexingStatus(data);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setIndexingStatus((prev) => ({ ...prev, error: err.message }));
-        }
-      }
-    }
-
-    loadStatus();
-    const interval = setInterval(loadStatus, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadStatus() {
-      try {
-        const res = await fetch(`${API_BASE}/api/indexing/status`);
-        const data = await res.json();
-        if (!cancelled) {
-          setIndexingStatus(data);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setIndexingStatus((prev) => ({ ...prev, error: err.message }));
-        }
-      }
-    }
-
-    loadStatus();
-    const interval = setInterval(loadStatus, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadStatus() {
-      try {
-        const res = await fetch(`${API_BASE}/api/indexing/status`);
-        const data = await res.json();
-        if (!cancelled) {
-          setIndexingStatus(data);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setIndexingStatus((prev) => ({ ...prev, error: err.message }));
-        }
-      }
-    }
-
-    loadStatus();
-    const interval = setInterval(loadStatus, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadStatus() {
-      try {
-        const res = await fetch(`${API_BASE}/api/indexing/status`);
-        const data = await res.json();
-        if (!cancelled) {
-          setIndexingStatus(data);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setIndexingStatus((prev) => ({ ...prev, error: err.message }));
-        }
-      }
-    }
-
-    loadStatus();
-    const interval = setInterval(loadStatus, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -383,12 +392,29 @@ export default function App() {
       }
       const data = await res.json();
       setMessages((prev) => [...prev.slice(0, -1), userMsg, { role: 'assistant', content: data.reply }]);
+      await refreshConversations();
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
   }
+
+  const handleNewChat = async () => {
+    const newToken = await createNewConversation();
+    await loadConversation(newToken);
+    setError('');
+    setInput('');
+    setAutoScroll(true);
+  };
+
+  const handleSelectChat = async (tok) => {
+    if (!tok || tok === token) return;
+    setError('');
+    setInput('');
+    setAutoScroll(true);
+    await selectConversation(tok);
+  };
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -417,82 +443,94 @@ export default function App() {
         </header>
 
         <main className="panel">
-          <div className="chat-surface">
-            <div className="indexing-status" role="status" aria-live="polite">
-              {showIndexing ? (
-                <>
-                  <span className="status-dot active" />
-                  <div>
-                    <div className="status-title">Indexing new documents…</div>
-                    <div className="status-caption">
-                      {currentLabel ? `Working on ${currentLabel}` : 'Queueing detected uploads'}
-                      {indexingStatus.queue && indexingStatus.queue.length > 0
-                        ? ` • Next: ${indexingStatus.queue.join(', ')}`
-                        : ''}
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <span className="status-dot" />
-                  <div>
-                    <div className="status-title">Knowledge base ready</div>
-                    <div className="status-caption">
-                      Watching for new PDFs in /files-for-uploading
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-            <div className="chat-window" ref={chatRef} aria-live="polite">
-              {messages.length === 0 && !loading ? (
-                <StarterPrompts onSelect={handleStarter} />
-              ) : (
-                <>
-                  {messages.map((msg, idx) => (
-                    <Message key={idx} role={msg.role} content={msg.content} />
-                  ))}
-                  {loading && (
-                    <div className="message assistant">
-                      <div className="typing">
-                        <span />
-                        <span />
-                        <span />
+          <div className="chat-layout">
+            <ConversationMenu
+              conversations={conversations}
+              activeToken={token}
+              onSelect={handleSelectChat}
+              onNew={handleNewChat}
+            />
+            <div className="chat-column">
+              <div className="chat-surface">
+                <div className="indexing-status" role="status" aria-live="polite">
+                  {showIndexing ? (
+                    <>
+                      <span className="status-dot active" />
+                      <div>
+                        <div className="status-title">Indexing new documents…</div>
+                        <div className="status-caption">
+                          {currentLabel ? `Working on ${currentLabel}` : 'Queueing detected uploads'}
+                          {indexingStatus.queue && indexingStatus.queue.length > 0
+                            ? ` • Next: ${indexingStatus.queue.join(', ')}`
+                            : ''}
+                        </div>
                       </div>
-                    </div>
+                    </>
+                  ) : (
+                    <>
+                      <span className="status-dot" />
+                      <div>
+                        <div className="status-title">Knowledge base ready</div>
+                        <div className="status-caption">Watching for new PDFs in /files-for-uploading</div>
+                      </div>
+                    </>
                   )}
-                </>
-              )}
-              {error && <div className="alert">{error}</div>}
-            </div>
+                </div>
+                <div className="chat-window" ref={chatRef} aria-live="polite">
+                  {initializing ? (
+                    <div className="message assistant">
+                      <div className="plaintext">Loading your chat…</div>
+                    </div>
+                  ) : messages.length === 0 && !loading ? (
+                    <StarterPrompts onSelect={handleStarter} />
+                  ) : (
+                    <>
+                      {messages.map((msg, idx) => (
+                        <Message key={idx} role={msg.role} content={msg.content} />
+                      ))}
+                      {loading && (
+                        <div className="message assistant">
+                          <div className="typing">
+                            <span />
+                            <span />
+                            <span />
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {error && <div className="alert">{error}</div>}
+                </div>
 
-            <form className="chat-form" onSubmit={handleSubmit}>
-              <div className="input-wrapper">
-                <textarea
-                  value={input}
-                  placeholder="Type your message here..."
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  disabled={!token || loading}
-                  rows={2}
-                />
-                <button
-                  type="submit"
-                  className={`send-button ${hasMessage && !loading ? 'active' : ''}`}
-                  aria-label="Send message"
-                  disabled={!token || loading || !hasMessage}
-                >
-                  <span className="send-icon" aria-hidden="true">
-                    <svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg" role="presentation">
-                      <path
-                        d="M3.5 9.5 15.8 4.2c.5-.2 1 .3.8.8L11 17.5c-.2.5-.9.5-1.1 0l-2-5-5-2c-.5-.2-.5-.9 0-1z"
-                        fill="#000"
-                      />
-                    </svg>
-                  </span>
-                </button>
+                <form className="chat-form" onSubmit={handleSubmit}>
+                  <div className="input-wrapper">
+                    <textarea
+                      value={input}
+                      placeholder="Type your message here..."
+                      onChange={(e) => setInput(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      disabled={!token || loading}
+                      rows={2}
+                    />
+                    <button
+                      type="submit"
+                      className={`send-button ${hasMessage && !loading ? 'active' : ''}`}
+                      aria-label="Send message"
+                      disabled={!token || loading || !hasMessage}
+                    >
+                      <span className="send-icon" aria-hidden="true">
+                        <svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg" role="presentation">
+                          <path
+                            d="M3.5 9.5 15.8 4.2c.5-.2 1 .3.8.8L11 17.5c-.2.5-.9.5-1.1 0l-2-5-5-2c-.5-.2-.5-.9 0-1z"
+                            fill="#000"
+                          />
+                        </svg>
+                      </span>
+                    </button>
+                  </div>
+                </form>
               </div>
-            </form>
+            </div>
           </div>
         </main>
       </div>

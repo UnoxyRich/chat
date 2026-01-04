@@ -11,6 +11,7 @@ import {
   addMessage,
   listMessages,
   logInteraction,
+  listConversations,
   getRecentIndexingJobs
 } from './db.js';
 import chokidar from 'chokidar';
@@ -110,6 +111,11 @@ async function startup() {
   indexingState.currentFile = 'initial-scan';
   console.log('[RAG] Initial ingestion starting');
   const results = await ingestDocuments(db, openaiClient);
+  if (!results.length) {
+    throw new Error(
+      `No PDFs found in ${CONFIG.filesDir}. Place the knowledge base PDFs there so embeddings can be generated.`
+    );
+  }
   indexingState.lastResult = { filename: 'initial-scan', status: 'completed', results, completedAt: Date.now() };
   indexingState.state = 'idle';
   indexingState.currentFile = null;
@@ -136,14 +142,34 @@ startup()
     process.exit(1);
   });
 
-function buildMessages(history, context, userInput) {
-  const messages = [{ role: 'system', content: systemPrompt }];
+function isGreeting(text) {
+  const normalized = text.trim().toLowerCase().replace(/[!,.。！？]/g, '');
+  const greetings = ['hi', 'hello', 'hey', 'hola', '你好', '您好'];
+  return greetings.includes(normalized);
+}
+
+function detectLanguage(text) {
+  if (/[^\x00-\x7F]/.test(text) && /[\u4e00-\u9fff]/.test(text)) {
+    return 'zh';
+  }
+  return 'en';
+}
+
+function buildMessages(context, userInput, language) {
+  const safetyInstruction =
+    'Use only the provided RAG context to answer. If the context is missing or insufficient, say you cannot find the information and ask for a specific product name or documentation. Never invent details.';
+  const languageInstruction =
+    language === 'zh'
+      ? '请使用用户提问的语言进行回答，若缺少上下文，请礼貌告知无法找到相关信息，不要猜测。'
+      : 'Respond in the user\'s language. If you lack sufficient context, politely state that and do not guess.';
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'system', content: safetyInstruction },
+    { role: 'system', content: languageInstruction }
+  ];
   if (context) {
     messages.push({ role: 'system', content: `RAG context:\n${context}` });
   }
-  history.forEach((msg) => {
-    messages.push({ role: msg.role, content: msg.content });
-  });
   messages.push({ role: 'user', content: userInput });
   return messages;
 }
@@ -211,9 +237,16 @@ app.get('/api/indexing/status', (req, res) => {
 
 app.get('/api/conversation/:token', (req, res) => {
   const { token } = req.params;
+  upsertConversation(db, token);
   const messages = listMessages(db, token);
   res.json({ messages });
 });
+
+app.get('/api/conversations', (req, res) => {
+  const conversations = listConversations(db, 100);
+  res.json({ conversations });
+});
+
 
 app.post('/api/chat', async (req, res) => {
   const { token, message } = req.body;
@@ -221,58 +254,63 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: 'token and message are required' });
   }
   upsertConversation(db, token);
-  const history = listMessages(db, token);
   const userMessage = addMessage(db, token, 'user', message);
+  const language = detectLanguage(message);
+  const greetingReply =
+    language === 'zh' ? '你好！很高兴和你交流，我可以怎样帮助你？' : 'Hello! How can I help you today?';
+
+  if (isGreeting(message)) {
+    const aiMessage = addMessage(db, token, 'assistant', greetingReply);
+    logInteraction(db, token, userMessage.id, aiMessage.id, {
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      ragSources: JSON.stringify([])
+    });
+    return res.json({ reply: greetingReply, sources: [] });
+  }
+
   try {
     const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message);
     console.log(`[RAG] Retrieved ${contextChunks.length} chunks for query (max score: ${maxScore ?? 'n/a'})`);
 
-    const systemTokens = estimateTokens(systemPrompt);
+    const systemTokens = estimateTokens(systemPrompt) + estimateTokens(greetingReply) + 50;
     const userTokens = estimateTokens(message);
-    const historyWithTokens = history.map((msg) => ({ ...msg, tokens: estimateTokens(msg.content) }));
-    let trimmedHistory = [...historyWithTokens];
-
     let selectedContext = contextChunks.map((chunk) => ({ ...chunk, tokens: estimateTokens(chunk.text) }));
 
-    const computeReserved = (historyMsgs, contextMsgs) => {
-      const historyTokens = historyMsgs.reduce((sum, msg) => sum + msg.tokens, 0);
+    const CONTEXT_TOKEN_BUDGET = 2000;
+    const PROMPT_TOKEN_BUDGET = 3000;
+
+    const computeReserved = (contextMsgs) => {
       const contextTokens = contextMsgs.reduce((sum, chunk) => sum + chunk.tokens, 0);
-      return systemTokens + userTokens + historyTokens + contextTokens;
+      return systemTokens + userTokens + contextTokens;
     };
 
-    const targetWindow = CONFIG.contextWindow;
-    let reservedTokens = computeReserved(trimmedHistory, selectedContext);
+    let reservedTokens = computeReserved(selectedContext);
 
-    while (reservedTokens >= targetWindow && trimmedHistory.length > 0) {
-      trimmedHistory.shift();
-      reservedTokens = computeReserved(trimmedHistory, selectedContext);
-    }
-
-    while (reservedTokens >= targetWindow && selectedContext.length > 0) {
+    while (reservedTokens > CONTEXT_TOKEN_BUDGET && selectedContext.length > 0) {
       selectedContext.pop();
-      reservedTokens = computeReserved(trimmedHistory, selectedContext);
+      reservedTokens = computeReserved(selectedContext);
     }
 
-    if (reservedTokens >= targetWindow) {
-      throw new Error('Insufficient context window for request even after trimming history and context.');
+    if (reservedTokens >= PROMPT_TOKEN_BUDGET) {
+      throw new Error('Insufficient context window for request even after trimming context.');
     }
 
-    const remainingForGeneration = targetWindow - reservedTokens;
+    const remainingForGeneration = PROMPT_TOKEN_BUDGET - reservedTokens;
     const maxGenerationTokens = Math.min(CONFIG.outputTokenCap, remainingForGeneration);
 
     if (maxGenerationTokens <= 0) {
       throw new Error('No tokens available for generation after budgeting.');
     }
 
-    const finalHistory = trimmedHistory.map(({ tokens, ...rest }) => rest);
     const finalContextText = selectedContext.map((chunk) => chunk.text).join('\n\n');
     const finalSources = sources.slice(0, selectedContext.length);
 
     if (selectedContext.length === 0) {
       const noDataReply =
-        maxScore === null
-          ? 'I could not find any indexed documents yet. Please add the relevant PDFs to /files-for-uploading so I can help.'
-          : 'I could not find relevant information for that request in the indexed PDFs. Please verify the product name or upload the corresponding documentation.';
+        language === 'zh'
+          ? '没有找到相关的文档内容。请提供具体的产品名称或上传对应的PDF以便我查阅。'
+          : 'I could not find relevant information in the indexed documents. Please provide the exact product name or upload the related PDF.';
       const aiMessage = addMessage(db, token, 'assistant', noDataReply);
       logInteraction(db, token, userMessage.id, aiMessage.id, {
         ip: req.ip,
@@ -286,12 +324,10 @@ app.post('/api/chat', async (req, res) => {
       JSON.stringify(
         {
           event: 'token_budget',
-          totalContextTokens: reservedTokens,
           reservedTokens,
           maxGenerationTokens,
           systemTokens,
           userTokens,
-          historyTokens: trimmedHistory.reduce((sum, msg) => sum + msg.tokens, 0),
           contextTokens: selectedContext.reduce((sum, chunk) => sum + chunk.tokens, 0)
         },
         null,
@@ -299,7 +335,7 @@ app.post('/api/chat', async (req, res) => {
       )
     );
 
-    const messages = buildMessages(finalHistory, finalContextText, message);
+    const messages = buildMessages(finalContextText, message, language);
     const completion = await openaiClient.chat.completions.create({
       model: CONFIG.lmStudio.chatModel,
       messages,

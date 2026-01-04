@@ -97,6 +97,7 @@ export async function ingestDocument(db, client, filename) {
     failIndexingJob(db, jobId, err.message);
     throw err;
   }
+  return results;
 }
 
 export async function ingestDocuments(db, client) {

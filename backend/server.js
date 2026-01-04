@@ -11,10 +11,10 @@ import {
   addMessage,
   listMessages,
   logInteraction,
-  getRecentIndexingJobs
+  getRecentIndexingJobs,
+  resetRagData
 } from './db.js';
-import chokidar from 'chokidar';
-import { ingestDocuments, ingestDocument, retrieveContext, createOpenAIClient } from '../rag/rag.js';
+import { ingestDocuments, retrieveContext, createOpenAIClient } from '../rag/rag.js';
 
 const app = express();
 app.use(cors());
@@ -27,10 +27,13 @@ ensureDirectories();
 const db = initDatabase();
 let systemPrompt = '';
 let openaiClient = null;
-const pendingFiles = new Set();
-const indexingState = {
-  state: 'idle',
+const ragState = {
+  state: 'indexing',
   currentFile: null,
+  totalFiles: 0,
+  processedFiles: 0,
+  totalChunks: 0,
+  error: null,
   lastResult: null
 };
 
@@ -69,23 +72,60 @@ async function verifyLMStudio(client) {
   }
 }
 
+async function rebuildRagIndex() {
+  ragState.state = 'indexing';
+  ragState.error = null;
+  ragState.currentFile = null;
+  ragState.processedFiles = 0;
+  ragState.totalChunks = 0;
+  ragState.lastResult = null;
+
+  console.log('[rag] rebuilding index from scratch');
+  resetRagData(db);
+
+  const files = fs.readdirSync(CONFIG.filesDir).filter((file) => file.toLowerCase().endsWith('.pdf'));
+  ragState.totalFiles = files.length;
+  console.log(`[rag] scanning files-for-uploading (${files.length} files)`);
+
+  const { results, processedFiles, totalChunks, totalFiles } = await ingestDocuments(db, openaiClient, {
+    onFileStart: (filename) => {
+      ragState.currentFile = filename;
+      console.log(`[rag] embedding file: ${filename}`);
+    }
+  });
+
+  ragState.currentFile = null;
+  ragState.processedFiles = processedFiles;
+  ragState.totalChunks = totalChunks;
+  ragState.lastResult = results[results.length - 1] || null;
+
+  results
+    .filter((item) => item.status === 'error')
+    .forEach((item) => console.error(`[rag] failed to embed ${item.filename}: ${item.error}`));
+
+  console.log(`[rag] completed: ${processedFiles} files, ${totalChunks} chunks`);
+  const allFailed = totalFiles > 0 && processedFiles === 0;
+  if (allFailed) {
+    ragState.state = 'error';
+    ragState.error = 'No documents indexed successfully';
+  } else {
+    ragState.state = 'ready';
+    ragState.error = null;
+  }
+  console.log(`[rag] status: ${ragState.state}`);
+}
+
 async function startup() {
   await loadSystemPrompt();
   openaiClient = createOpenAIClient();
   await verifyLMStudio(openaiClient);
-  indexingState.state = 'indexing';
-  indexingState.currentFile = 'initial-scan';
-  const results = await ingestDocuments(db, openaiClient);
-  indexingState.lastResult = { filename: 'initial-scan', status: 'completed', results, completedAt: Date.now() };
-  indexingState.state = 'idle';
-  indexingState.currentFile = null;
+  await rebuildRagIndex();
   console.log(`Using chat model ${CONFIG.lmStudio.chatModel} with context window ${CONFIG.contextWindow}.`);
   console.log(`Using embedding model ${CONFIG.lmStudio.embeddingModel}.`);
 }
 
 startup()
   .then(() => {
-    startFileWatcher();
     app.listen(CONFIG.port, () => {
       console.log(`Backend running on port ${CONFIG.port}`);
     });
@@ -111,43 +151,6 @@ function generateToken() {
   return crypto.randomBytes(24).toString('base64url');
 }
 
-let processingQueue = false;
-
-async function processQueue() {
-  if (processingQueue) return;
-  processingQueue = true;
-  while (pendingFiles.size > 0) {
-    const [next] = pendingFiles;
-    pendingFiles.delete(next);
-    indexingState.state = 'indexing';
-    indexingState.currentFile = next;
-    try {
-      const result = await ingestDocument(db, openaiClient, next);
-      indexingState.lastResult = { ...result, completedAt: Date.now() };
-      console.log(`Indexed ${next}: ${result.status}`);
-    } catch (err) {
-      indexingState.lastResult = { filename: next, status: 'error', error: err.message, completedAt: Date.now() };
-      console.error(`Failed to index ${next}:`, err.message);
-    }
-    indexingState.state = 'idle';
-    indexingState.currentFile = null;
-  }
-  processingQueue = false;
-}
-
-function enqueueFile(filename) {
-  if (!filename.toLowerCase().endsWith('.pdf')) return;
-  pendingFiles.add(path.basename(filename));
-  processQueue();
-}
-
-function startFileWatcher() {
-  const watcher = chokidar.watch(CONFIG.filesDir, { ignoreInitial: true, depth: 0 });
-  watcher.on('add', enqueueFile);
-  watcher.on('change', enqueueFile);
-  console.log(`Watching ${CONFIG.filesDir} for new or updated PDFs...`);
-}
-
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
@@ -160,10 +163,7 @@ app.post('/api/token', (req, res) => {
 
 app.get('/api/indexing/status', (req, res) => {
   res.json({
-    state: indexingState.state,
-    currentFile: indexingState.currentFile,
-    queue: Array.from(pendingFiles),
-    lastResult: indexingState.lastResult,
+    ...ragState,
     recentJobs: getRecentIndexingJobs(db, 15)
   });
 });
@@ -183,6 +183,22 @@ app.post('/api/chat', async (req, res) => {
   const history = listMessages(db, token);
   const userMessage = addMessage(db, token, 'user', message);
   try {
+    if (ragState.state === 'indexing') {
+      return res.status(503).json({ error: 'Knowledge base is still indexing. Please try again shortly.' });
+    }
+
+    if (ragState.state === 'error' || ragState.totalChunks === 0) {
+      const replyText =
+        'No documents are available in the knowledge base right now. Please add PDFs to /files-for-uploading and restart the server to rebuild the index.';
+      const aiMessage = addMessage(db, token, 'assistant', replyText);
+      logInteraction(db, token, userMessage.id, aiMessage.id, {
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+        ragSources: JSON.stringify([])
+      });
+      return res.json({ reply: replyText, sources: [] });
+    }
+
     const { contextChunks, sources } = await retrieveContext(db, openaiClient, message);
 
     const systemTokens = estimateTokens(systemPrompt);

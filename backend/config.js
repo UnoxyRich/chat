@@ -2,6 +2,10 @@ import path from 'path';
 import fs from 'fs';
 
 const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const embeddingModel =
+  process.env.EMBEDDING_MODEL ??
+  process.env.LM_STUDIO_EMBEDDING_MODEL ??
+  'text-embedding-nomic-embed-text-v1.5';
 
 export const CONFIG = {
   systemPromptPath: path.join(rootDir, 'SystemPromt.txt'),
@@ -14,7 +18,7 @@ export const CONFIG = {
   lmStudio: {
     baseURL: process.env.LM_STUDIO_BASE_URL || 'http://localhost:1234/v1',
     chatModel: process.env.LM_STUDIO_CHAT_MODEL || 'qwen/qwen3-vl-8b',
-    embeddingModel: process.env.LM_STUDIO_EMBEDDING_MODEL || 'text-embedding-nomic-embed-text-v1.5'
+    embeddingModel
   },
   retrieval: {
     chunkSize: 800,

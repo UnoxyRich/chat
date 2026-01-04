@@ -68,14 +68,15 @@ async function verifyLMStudio(client) {
     throw new Error(`LM Studio is not reachable at ${CONFIG.lmStudio.baseURL}: ${err.message}`);
   }
 
+  console.log('[LM Studio] Available models:', modelIds.join(', '));
+
   if (!modelIds.includes(CONFIG.lmStudio.chatModel)) {
     throw new Error(`Chat model ${CONFIG.lmStudio.chatModel} not available in LM Studio`);
   }
 
   if (!modelIds.includes(CONFIG.lmStudio.embeddingModel)) {
     throw new Error(
-      `Embedding model ${CONFIG.lmStudio.embeddingModel} not available in LM Studio. ` +
-        'Verify it is downloaded and listed under /v1/models.'
+      `Embedding model '${CONFIG.lmStudio.embeddingModel}' not found in LM Studio. Available models: [${modelIds.join(', ')}]`
     );
   }
 

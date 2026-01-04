@@ -375,8 +375,9 @@ export default function App() {
     const messageText = typeof messageOverride === 'string' ? messageOverride : input;
     if (!messageText.trim() || !token) return;
     setError('');
+    const assistantId = `assistant-${Date.now()}`;
     const userMsg = { role: 'user', content: messageText, local: true };
-    setMessages((prev) => [...prev, userMsg]);
+    setMessages((prev) => [...prev, userMsg, { role: 'assistant', content: '', streaming: true, id: assistantId }]);
     setInput('');
     setLoading(true);
     try {
@@ -386,17 +387,94 @@ export default function App() {
         body: JSON.stringify({ token, message: userMsg.content })
       });
       if (!res.ok) {
-        const err = await res.json();
-        setError(err.error || 'Chat failed');
+        const errText = await res.text();
+        setError(errText || 'Chat failed');
+        setMessages((prev) => prev.filter((m) => m.id !== assistantId));
         return;
       }
-      const data = await res.json();
-      setMessages((prev) => [...prev.slice(0, -1), userMsg, { role: 'assistant', content: data.reply }]);
+      if (!res.body) {
+        setError('No response body from server');
+        setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const handlePayload = (payload) => {
+        if (payload.type === 'token') {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const idx = updated.findIndex((m) => m.id === assistantId);
+            if (idx !== -1) {
+              const current = updated[idx];
+              updated[idx] = {
+                ...current,
+                content: `${current.content || ''}${payload.token || ''}`,
+                streaming: true
+              };
+            }
+            return updated;
+          });
+          return;
+        }
+
+        if (payload.type === 'done') {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const idx = updated.findIndex((m) => m.id === assistantId);
+            if (idx !== -1) {
+              updated[idx] = { ...updated[idx], streaming: false, sources: payload.sources || [] };
+            }
+            return updated;
+          });
+          setLoading(false);
+          return;
+        }
+
+        if (payload.type === 'error') {
+          setError(payload.message || 'Chat failed');
+          setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+          setLoading(false);
+        }
+      };
+
+      const processBuffer = (isFinal = false) => {
+        const parts = buffer.split('\n');
+        if (!isFinal) {
+          buffer = parts.pop();
+        } else {
+          buffer = '';
+        }
+        parts.filter(Boolean).forEach((line) => {
+          try {
+            const payload = JSON.parse(line);
+            handlePayload(payload);
+          } catch (err) {
+            console.error('Failed to parse stream chunk', line, err);
+          }
+        });
+      };
+
+      // Stream tokens as they arrive
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        processBuffer(done);
+        if (done) break;
+      }
+
       await refreshConversations();
     } catch (err) {
       setError(err.message);
+      setMessages((prev) => prev.filter((m) => m.id !== assistantId));
     } finally {
       setLoading(false);
+      setMessages((prev) =>
+        prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m))
+      );
     }
   }
 

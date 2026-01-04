@@ -181,13 +181,21 @@ function cosineSimilarity(a, b) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export async function retrieveContext(db, client, query, requestId = 'retrieve-unknown') {
+function computeVectorNorm(vector) {
+  return Math.sqrt(vector.reduce((sum, v) => sum + v * v, 0));
+}
+
+export async function retrieveContext(db, client, query, requestId = 'retrieve-unknown', options = {}) {
   const rows = getAllEmbeddings(db);
   if (!rows.length) {
     return { contextChunks: [], sources: [], maxScore: null };
   }
 
+  const containsNonAscii = /[^\x00-\x7F]/.test(query);
+  const containsCJK = /[\u4e00-\u9fff]/.test(query);
   const queryEmbedding = (await embedBatch(client, [query], requestId))[0];
+  const queryNorm = computeVectorNorm(queryEmbedding);
+
   const scored = rows.map((row) => {
     const vector = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
     let score = cosineSimilarity(queryEmbedding, Array.from(vector));
@@ -215,7 +223,38 @@ export async function retrieveContext(db, client, query, requestId = 'retrieve-u
     };
   });
 
+  console.log(
+    JSON.stringify(
+      {
+        event: 'similarity_scores_all',
+        requestId,
+        language: options.language || 'unknown',
+        containsNonAscii,
+        containsCJK,
+        queryNorm,
+        scores: scored.map((item) => ({ filename: item.filename, chunkIndex: item.chunkIndex, score: item.score }))
+      },
+      null,
+      2
+    )
+  );
+
   const top = scored.sort((a, b) => b.score - a.score).slice(0, CONFIG.retrieval.topK);
+  console.log(
+    JSON.stringify(
+      {
+        event: 'similarity_scores_raw',
+        requestId,
+        language: options.language || 'unknown',
+        containsNonAscii,
+        containsCJK,
+        queryNorm,
+        scores: top.map((item) => ({ filename: item.filename, chunkIndex: item.chunkIndex, score: item.score }))
+      },
+      null,
+      2
+    )
+  );
   console.log(
     JSON.stringify(
       {
@@ -236,7 +275,6 @@ export async function retrieveContext(db, client, query, requestId = 'retrieve-u
   const minTopScore = top.length ? top[top.length - 1].score : null;
   const minScore = Number.isFinite(CONFIG.retrieval.minScore) ? CONFIG.retrieval.minScore : 0;
   const filtered = top.filter((item) => item.score >= minScore);
-  const chosen = filtered.length ? filtered : top;
 
   console.log(
     JSON.stringify(
@@ -271,12 +309,46 @@ export async function retrieveContext(db, client, query, requestId = 'retrieve-u
     );
   }
 
+  const chosen = filtered.length ? filtered : top;
+  if (filtered.length === 0 && top.length > 0) {
+    console.warn(
+      JSON.stringify(
+        {
+          event: 'rag_filter_override',
+          requestId,
+          reason: 'filtered_hits_zero',
+          injectedFilename: top[0].filename,
+          injectedChunkIndex: top[0].chunkIndex,
+          injectedScore: top[0].score
+        },
+        null,
+        2
+      )
+    );
+  }
+
   const contextChunks = chosen.map((item) => ({
     text: `Source: ${item.filename} [chunk ${item.chunkIndex}]\n${item.text}`,
     filename: item.filename,
     chunkIndex: item.chunkIndex,
     score: item.score
   }));
+
+  console.log(
+    JSON.stringify(
+      {
+        event: 'similarity_documents_returned',
+        requestId,
+        language: options.language || 'unknown',
+        containsNonAscii,
+        containsCJK,
+        maxScore,
+        documents: chosen.map((item) => ({ filename: item.filename, chunkIndex: item.chunkIndex, score: item.score }))
+      },
+      null,
+      2
+    )
+  );
 
   return { contextChunks, sources: chosen, maxScore };
 }

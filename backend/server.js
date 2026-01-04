@@ -111,6 +111,11 @@ async function startup() {
   indexingState.currentFile = 'initial-scan';
   console.log('[RAG] Initial ingestion starting');
   const results = await ingestDocuments(db, openaiClient);
+  if (!results.length) {
+    throw new Error(
+      `No PDFs found in ${CONFIG.filesDir}. Place the knowledge base PDFs there so embeddings can be generated.`
+    );
+  }
   indexingState.lastResult = { filename: 'initial-scan', status: 'completed', results, completedAt: Date.now() };
   indexingState.state = 'idle';
   indexingState.currentFile = null;

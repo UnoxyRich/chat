@@ -46,6 +46,9 @@ status "npm version: $(npm -v)"
 # Validate required files and directories.
 [ -f "$SYSTEM_PROMPT" ] || fail "SystemPromt.txt is missing at $SYSTEM_PROMPT"
 [ -d "$FILES_DIR" ] || fail "files-for-uploading/ directory is missing at $FILES_DIR"
+if ! ls "$FILES_DIR"/*.pdf >/dev/null 2>&1; then
+  fail "No PDFs found in $FILES_DIR. Place the knowledge base PDFs there before deploying so they can be embedded."
+fi
 
 mkdir -p "$LOG_DIR" "$DB_DIR"
 

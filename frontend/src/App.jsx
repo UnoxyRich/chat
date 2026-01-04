@@ -398,38 +398,64 @@ export default function App() {
         return;
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      const contentType = res.headers.get('content-type') || '';
+      const isSse = contentType.includes('text/event-stream');
+      const isJson = contentType.includes('application/json');
+      const streamDebug = localStorage.getItem('stream_debug') === '1';
+
+      const appendDelta = (delta) => {
+        if (!delta) return;
+        setMessages((prev) => {
+          const updated = [...prev];
+          const idx = updated.findIndex((m) => m.id === assistantId);
+          if (idx !== -1) {
+            const current = updated[idx];
+            updated[idx] = {
+              ...current,
+              content: `${current.content || ''}${delta}`,
+              streaming: true
+            };
+          }
+          return updated;
+        });
+      };
+
+      const finishStream = (sources = []) => {
+        setMessages((prev) => {
+          const updated = [...prev];
+          const idx = updated.findIndex((m) => m.id === assistantId);
+          if (idx !== -1) {
+            updated[idx] = { ...updated[idx], streaming: false, sources };
+          }
+          return updated;
+        });
+        setLoading(false);
+      };
 
       const handlePayload = (payload) => {
+        if (!payload) return;
+        if (streamDebug) {
+          // eslint-disable-next-line no-console
+          console.log('[stream][payload]', payload);
+        }
+
         if (payload.type === 'token') {
-          setMessages((prev) => {
-            const updated = [...prev];
-            const idx = updated.findIndex((m) => m.id === assistantId);
-            if (idx !== -1) {
-              const current = updated[idx];
-              updated[idx] = {
-                ...current,
-                content: `${current.content || ''}${payload.token || ''}`,
-                streaming: true
-              };
-            }
-            return updated;
-          });
+          appendDelta(payload.token || '');
           return;
         }
 
-        if (payload.type === 'done') {
-          setMessages((prev) => {
-            const updated = [...prev];
-            const idx = updated.findIndex((m) => m.id === assistantId);
-            if (idx !== -1) {
-              updated[idx] = { ...updated[idx], streaming: false, sources: payload.sources || [] };
-            }
-            return updated;
-          });
-          setLoading(false);
+        if (payload.type === 'response.output_text.delta') {
+          appendDelta(payload.delta || '');
+          return;
+        }
+
+        if (payload.delta && typeof payload.delta === 'string') {
+          appendDelta(payload.delta);
+          return;
+        }
+
+        if (payload.type === 'done' || payload.type === 'response.completed' || payload.type === 'response.finished') {
+          finishStream(payload.sources || []);
           return;
         }
 
@@ -440,34 +466,80 @@ export default function App() {
         }
       };
 
-      const processBuffer = (isFinal = false) => {
-        const parts = buffer.split('\n');
-        if (!isFinal) {
-          buffer = parts.pop();
-        } else {
-          buffer = '';
-        }
-        parts
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .forEach((line) => {
-            const normalized = line.startsWith('data:') ? line.slice(5).trim() : line;
+      if (isSse && res.body) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let parseFailed = false;
+
+        const processChunk = (chunk, isFinal = false) => {
+          const text = decoder.decode(chunk || new Uint8Array(), { stream: !isFinal });
+          buffer += text;
+          const lines = buffer.split('\n');
+          if (!isFinal) {
+            buffer = lines.pop();
+          } else {
+            buffer = '';
+          }
+
+          lines.forEach((line) => {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) return;
+            const payloadText = trimmed.slice(5).trim();
+            if (streamDebug) {
+              // eslint-disable-next-line no-console
+              console.log('[stream][raw]', payloadText);
+            }
+            if (payloadText === '[DONE]') {
+              finishStream();
+              return;
+            }
             try {
-              const payload = JSON.parse(normalized);
+              const payload = JSON.parse(payloadText);
               handlePayload(payload);
             } catch (err) {
-              console.error('Failed to parse stream chunk', normalized, err);
+              parseFailed = true;
+              // eslint-disable-next-line no-console
+              console.warn('Streaming parse failed; delivering partial content', payloadText, err);
             }
           });
-      };
+        };
 
-      // Stream tokens as they arrive
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { value, done } = await reader.read();
-        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-        processBuffer(done);
-        if (done) break;
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const { value, done } = await reader.read();
+          processChunk(value, done);
+          if (done) break;
+        }
+
+        if (parseFailed) {
+          setError((prev) => prev || 'Streaming interrupted; partial response shown');
+          finishStream();
+        }
+
+        await refreshConversations();
+        return;
+      }
+
+      // Non-streaming JSON response
+      if (isJson) {
+        const payload = await res.json();
+        handlePayload(payload);
+        finishStream(payload.sources || []);
+        await refreshConversations();
+        return;
+      }
+
+      // Fallback: attempt JSON parse from full text
+      const text = await res.text();
+      try {
+        const payload = JSON.parse(text);
+        handlePayload(payload);
+        finishStream(payload.sources || []);
+      } catch (err) {
+        appendDelta(text);
+        finishStream();
+        setError((prev) => prev || 'Received non-JSON response; displayed raw text');
       }
 
       await refreshConversations();

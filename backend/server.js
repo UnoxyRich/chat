@@ -53,20 +53,35 @@ async function loadSystemPrompt() {
 }
 
 async function verifyLMStudio(client) {
+  let modelIds;
   try {
     const res = await client.models.list();
-    const modelIds = res.data.map((m) => m.id);
-    if (!modelIds.includes(CONFIG.lmStudio.chatModel)) {
-      throw new Error(`Configured chat model ${CONFIG.lmStudio.chatModel} not found in LM Studio.`);
-    }
-
-    if (!modelIds.includes(CONFIG.lmStudio.embeddingModel)) {
-      throw new Error(`Configured embedding model ${CONFIG.lmStudio.embeddingModel} not found in LM Studio.`);
-    }
+    modelIds = res.data.map((m) => m.id);
   } catch (err) {
     console.error('Failed to connect to LM Studio', err.message);
     throw new Error('LM Studio is not reachable');
   }
+
+  if (!modelIds.includes(CONFIG.lmStudio.chatModel)) {
+    throw new Error(`Chat model ${CONFIG.lmStudio.chatModel} not available in LM Studio`);
+  }
+
+  const desiredEmbedding = CONFIG.lmStudio.embeddingModel;
+  const fallbackEmbedding = 'text-embedding-nomic-embed-text-v1.5';
+
+  if (modelIds.includes(desiredEmbedding)) {
+    return { embeddingModel: desiredEmbedding, fallbackUsed: false };
+  }
+
+  if (desiredEmbedding === 'text-embedding-mxbai-embed-large-v1' && modelIds.includes(fallbackEmbedding)) {
+    console.warn(
+      `[LM Studio] Embedding model ${desiredEmbedding} not available; falling back to ${fallbackEmbedding}.`
+    );
+    CONFIG.lmStudio.embeddingModel = fallbackEmbedding;
+    return { embeddingModel: fallbackEmbedding, fallbackUsed: true };
+  }
+
+  throw new Error(`Embedding model ${desiredEmbedding} not available in LM Studio`);
 }
 
 async function rebuildRagIndex() {
@@ -116,7 +131,7 @@ async function startup() {
   await loadSystemPrompt();
   validateLMStudioEndpoint();
   openaiClient = createOpenAIClient();
-  await verifyLMStudio(openaiClient);
+  const { embeddingModel, fallbackUsed } = await verifyLMStudio(openaiClient);
   await warmUpModels(openaiClient);
   indexingState.state = 'indexing';
   indexingState.currentFile = 'initial-scan';
@@ -125,7 +140,10 @@ async function startup() {
   indexingState.state = 'idle';
   indexingState.currentFile = null;
   console.log('[LLM] Chat model pinned:', CONFIG.lmStudio.chatModel);
-  console.log('[LLM] Embedding model pinned:', CONFIG.lmStudio.embeddingModel);
+  console.log('[LLM] Embedding model pinned:', embeddingModel);
+  if (fallbackUsed) {
+    console.log('[LLM] Embedding model fallback in use; update LM Studio to restore preferred model.');
+  }
   console.log('[RAG] Embedding engine ready');
 }
 

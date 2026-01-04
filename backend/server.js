@@ -52,6 +52,35 @@ async function loadSystemPrompt() {
   systemPrompt = fs.readFileSync(CONFIG.systemPromptPath, 'utf-8');
 }
 
+function resolveEmbeddingModel(modelIds) {
+  const configuredEmbedding = CONFIG.lmStudio.embeddingModel;
+  const preferredEmbedding =
+    configuredEmbedding === 'text-embedding-3-large'
+      ? 'text-embedding-mxbai-embed-large-v1'
+      : configuredEmbedding;
+  const fallbackEmbedding = 'text-embedding-nomic-embed-text-v1.5';
+
+  const remapped = configuredEmbedding === 'text-embedding-3-large';
+  if (remapped) {
+    console.warn(
+      `[LM Studio] Embedding model ${configuredEmbedding} is deprecated; attempting ${preferredEmbedding} instead.`
+    );
+  }
+
+  if (modelIds.includes(preferredEmbedding)) {
+    return { embeddingModel: preferredEmbedding, fallbackUsed: false, remapped };
+  }
+
+  if (preferredEmbedding === 'text-embedding-mxbai-embed-large-v1' && modelIds.includes(fallbackEmbedding)) {
+    console.warn(
+      `[LM Studio] Embedding model ${preferredEmbedding} not available; falling back to ${fallbackEmbedding}.`
+    );
+    return { embeddingModel: fallbackEmbedding, fallbackUsed: true, remapped };
+  }
+
+  throw new Error(`Embedding model ${preferredEmbedding} not available in LM Studio`);
+}
+
 async function verifyLMStudio(client) {
   let modelIds;
   try {
@@ -59,79 +88,23 @@ async function verifyLMStudio(client) {
     modelIds = res.data.map((m) => m.id);
   } catch (err) {
     console.error('Failed to connect to LM Studio', err.message);
-    throw new Error('LM Studio is not reachable');
+    throw new Error(`LM Studio is not reachable at ${CONFIG.lmStudio.baseURL}: ${err.message}`);
   }
 
   if (!modelIds.includes(CONFIG.lmStudio.chatModel)) {
     throw new Error(`Chat model ${CONFIG.lmStudio.chatModel} not available in LM Studio`);
   }
 
-  const desiredEmbedding = CONFIG.lmStudio.embeddingModel;
-  const fallbackEmbedding = 'text-embedding-nomic-embed-text-v1.5';
-
-  if (modelIds.includes(desiredEmbedding)) {
-    return { embeddingModel: desiredEmbedding, fallbackUsed: false };
-  }
-
-  if (desiredEmbedding === 'text-embedding-mxbai-embed-large-v1' && modelIds.includes(fallbackEmbedding)) {
-    console.warn(
-      `[LM Studio] Embedding model ${desiredEmbedding} not available; falling back to ${fallbackEmbedding}.`
-    );
-    CONFIG.lmStudio.embeddingModel = fallbackEmbedding;
-    return { embeddingModel: fallbackEmbedding, fallbackUsed: true };
-  }
-
-  throw new Error(`Embedding model ${desiredEmbedding} not available in LM Studio`);
-}
-
-async function rebuildRagIndex() {
-  ragState.state = 'indexing';
-  ragState.error = null;
-  ragState.currentFile = null;
-  ragState.processedFiles = 0;
-  ragState.totalChunks = 0;
-  ragState.lastResult = null;
-
-  console.log('[rag] rebuilding index from scratch');
-  resetRagData(db);
-
-  const files = fs.readdirSync(CONFIG.filesDir).filter((file) => file.toLowerCase().endsWith('.pdf'));
-  ragState.totalFiles = files.length;
-  console.log(`[rag] scanning files-for-uploading (${files.length} files)`);
-
-  const { results, processedFiles, totalChunks, totalFiles } = await ingestDocuments(db, openaiClient, {
-    onFileStart: (filename) => {
-      ragState.currentFile = filename;
-      console.log(`[rag] embedding file: ${filename}`);
-    }
-  });
-
-  ragState.currentFile = null;
-  ragState.processedFiles = processedFiles;
-  ragState.totalChunks = totalChunks;
-  ragState.lastResult = results[results.length - 1] || null;
-
-  results
-    .filter((item) => item.status === 'error')
-    .forEach((item) => console.error(`[rag] failed to embed ${item.filename}: ${item.error}`));
-
-  console.log(`[rag] completed: ${processedFiles} files, ${totalChunks} chunks`);
-  const allFailed = totalFiles > 0 && processedFiles === 0;
-  if (allFailed) {
-    ragState.state = 'error';
-    ragState.error = 'No documents indexed successfully';
-  } else {
-    ragState.state = 'ready';
-    ragState.error = null;
-  }
-  console.log(`[rag] status: ${ragState.state}`);
+  const { embeddingModel, fallbackUsed, remapped } = resolveEmbeddingModel(modelIds);
+  CONFIG.lmStudio.embeddingModel = embeddingModel;
+  return { embeddingModel, fallbackUsed, remapped };
 }
 
 async function startup() {
   await loadSystemPrompt();
   validateLMStudioEndpoint();
   openaiClient = createOpenAIClient();
-  const { embeddingModel, fallbackUsed } = await verifyLMStudio(openaiClient);
+  const { embeddingModel, fallbackUsed, remapped } = await verifyLMStudio(openaiClient);
   await warmUpModels(openaiClient);
   indexingState.state = 'indexing';
   indexingState.currentFile = 'initial-scan';
@@ -141,6 +114,9 @@ async function startup() {
   indexingState.currentFile = null;
   console.log('[LLM] Chat model pinned:', CONFIG.lmStudio.chatModel);
   console.log('[LLM] Embedding model pinned:', embeddingModel);
+  if (remapped) {
+    console.log('[LLM] Embedding model remapped from text-embedding-3-large to preferred option.');
+  }
   if (fallbackUsed) {
     console.log('[LLM] Embedding model fallback in use; update LM Studio to restore preferred model.');
   }

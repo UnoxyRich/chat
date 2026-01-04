@@ -108,6 +108,7 @@ async function startup() {
   await warmUpModels(openaiClient);
   indexingState.state = 'indexing';
   indexingState.currentFile = 'initial-scan';
+  console.log('[RAG] Initial ingestion starting');
   const results = await ingestDocuments(db, openaiClient);
   indexingState.lastResult = { filename: 'initial-scan', status: 'completed', results, completedAt: Date.now() };
   indexingState.state = 'idle';
@@ -224,6 +225,7 @@ app.post('/api/chat', async (req, res) => {
   const userMessage = addMessage(db, token, 'user', message);
   try {
     const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message);
+    console.log(`[RAG] Retrieved ${contextChunks.length} chunks for query (max score: ${maxScore ?? 'n/a'})`);
 
     const systemTokens = estimateTokens(systemPrompt);
     const userTokens = estimateTokens(message);

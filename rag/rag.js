@@ -75,28 +75,39 @@ export async function ingestDocument(db, client, filename) {
   const hash = hashBuffer(buffer);
   const existing = getDocumentByFilename(db, filename);
   if (existing && existing.hash === hash && existing.mtime === stat.mtimeMs) {
+    console.log(`[RAG] Skipping unchanged document ${filename}`);
     return { filename, status: 'skipped' };
   }
 
   const jobId = startIndexingJob(db, filename, stat.mtimeMs, hash);
   try {
+    console.log(`[RAG] Parsing and chunking document ${filename}`);
     const data = await pdf(buffer);
     const chunks = splitText(data.text, CONFIG.retrieval.chunkSize, CONFIG.retrieval.chunkOverlap);
+    console.log(`[RAG] Generated ${chunks.length} chunks for ${filename}`);
     const embeddings = await embedBatch(client, chunks);
     const docId = replaceDocumentMetadata(db, filename, stat.mtimeMs, hash);
     embeddings.forEach((embedding, idx) => {
       storeEmbeddingChunk(db, docId, idx, embedding, chunks[idx]);
     });
+    console.log(`[RAG] Stored embeddings for ${filename}`);
     completeIndexingJob(db, jobId);
     return { filename, status: 'indexed', chunks: chunks.length };
   } catch (err) {
     failIndexingJob(db, jobId, err.message);
     throw err;
   }
+  return results;
 }
 
 export async function ingestDocuments(db, client) {
+  console.log(`[RAG] Scanning PDFs in ${CONFIG.filesDir}`);
   const files = fs.readdirSync(CONFIG.filesDir).filter((file) => file.toLowerCase().endsWith('.pdf'));
+  console.log(`[RAG] Found ${files.length} PDFs`);
+  if (files.length === 0) {
+    console.log('[RAG] No PDFs to index');
+    return [];
+  }
   const results = [];
   let hasError = false;
   for (const file of files) {
@@ -112,6 +123,7 @@ export async function ingestDocuments(db, client) {
     const failed = results.filter((r) => r.status === 'error').map((r) => r.filename).join(', ');
     throw new Error(`Failed to ingest: ${failed}`);
   }
+  console.log('[RAG] Index ready');
   return results;
 }
 
@@ -204,7 +216,7 @@ export async function warmUpModels(client) {
         await client.chat.completions.create({
           model: CONFIG.lmStudio.chatModel,
           messages: [{ role: 'system', content: 'warmup' }, { role: 'user', content: 'warmup' }],
-          max_tokens: 1
+          max_tokens: 16
         });
         console.log(`${warmupLabel} chat complete`);
       } catch (err) {

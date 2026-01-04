@@ -84,6 +84,49 @@ async function verifyLMStudio(client) {
   throw new Error(`Embedding model ${desiredEmbedding} not available in LM Studio`);
 }
 
+async function rebuildRagIndex() {
+  ragState.state = 'indexing';
+  ragState.error = null;
+  ragState.currentFile = null;
+  ragState.processedFiles = 0;
+  ragState.totalChunks = 0;
+  ragState.lastResult = null;
+
+  console.log('[rag] rebuilding index from scratch');
+  resetRagData(db);
+
+  const files = fs.readdirSync(CONFIG.filesDir).filter((file) => file.toLowerCase().endsWith('.pdf'));
+  ragState.totalFiles = files.length;
+  console.log(`[rag] scanning files-for-uploading (${files.length} files)`);
+
+  const { results, processedFiles, totalChunks, totalFiles } = await ingestDocuments(db, openaiClient, {
+    onFileStart: (filename) => {
+      ragState.currentFile = filename;
+      console.log(`[rag] embedding file: ${filename}`);
+    }
+  });
+
+  ragState.currentFile = null;
+  ragState.processedFiles = processedFiles;
+  ragState.totalChunks = totalChunks;
+  ragState.lastResult = results[results.length - 1] || null;
+
+  results
+    .filter((item) => item.status === 'error')
+    .forEach((item) => console.error(`[rag] failed to embed ${item.filename}: ${item.error}`));
+
+  console.log(`[rag] completed: ${processedFiles} files, ${totalChunks} chunks`);
+  const allFailed = totalFiles > 0 && processedFiles === 0;
+  if (allFailed) {
+    ragState.state = 'error';
+    ragState.error = 'No documents indexed successfully';
+  } else {
+    ragState.state = 'ready';
+    ragState.error = null;
+  }
+  console.log(`[rag] status: ${ragState.state}`);
+}
+
 async function startup() {
   await loadSystemPrompt();
   validateLMStudioEndpoint();

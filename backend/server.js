@@ -5,8 +5,23 @@ import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
 import { CONFIG, ensureDirectories } from './config.js';
-import { initDatabase, upsertConversation, addMessage, listMessages, logInteraction } from './db.js';
-import { ingestDocuments, retrieveContext, createOpenAIClient } from '../rag/rag.js';
+import {
+  initDatabase,
+  upsertConversation,
+  addMessage,
+  listMessages,
+  logInteraction,
+  getRecentIndexingJobs
+} from './db.js';
+import chokidar from 'chokidar';
+import {
+  ingestDocuments,
+  ingestDocument,
+  retrieveContext,
+  createOpenAIClient,
+  warmUpModels,
+  validateLMStudioEndpoint
+} from '../rag/rag.js';
 
 const app = express();
 app.use(cors());
@@ -19,6 +34,12 @@ ensureDirectories();
 const db = initDatabase();
 let systemPrompt = '';
 let openaiClient = null;
+const pendingFiles = new Set();
+const indexingState = {
+  state: 'idle',
+  currentFile: null,
+  lastResult: null
+};
 
 const TOKEN_ESTIMATE_DIVISOR = 4;
 
@@ -32,40 +53,60 @@ async function loadSystemPrompt() {
 }
 
 async function verifyLMStudio(client) {
+  let modelIds;
   try {
     const res = await client.models.list();
-    const modelIds = res.data.map((m) => m.id);
-    if (!modelIds.includes(CONFIG.lmStudio.chatModel)) {
-      throw new Error(`Configured chat model ${CONFIG.lmStudio.chatModel} not found in LM Studio.`);
-    }
-
-    if (!modelIds.includes(CONFIG.lmStudio.embeddingModel)) {
-      const preferredEmbedding = modelIds.find((id) => id !== CONFIG.lmStudio.chatModel && id.toLowerCase().includes('embed'));
-      const alternative = preferredEmbedding || modelIds.find((id) => id !== CONFIG.lmStudio.chatModel) || CONFIG.lmStudio.chatModel;
-      CONFIG.lmStudio.embeddingModel = alternative;
-      console.warn(
-        `Configured embedding model not found. Using ${CONFIG.lmStudio.embeddingModel}${
-          alternative === CONFIG.lmStudio.chatModel ? ' (chat model fallback)' : ''
-        }.`
-      );
-    }
+    modelIds = res.data.map((m) => m.id);
   } catch (err) {
     console.error('Failed to connect to LM Studio', err.message);
     throw new Error('LM Studio is not reachable');
   }
+
+  if (!modelIds.includes(CONFIG.lmStudio.chatModel)) {
+    throw new Error(`Chat model ${CONFIG.lmStudio.chatModel} not available in LM Studio`);
+  }
+
+  const desiredEmbedding = CONFIG.lmStudio.embeddingModel;
+  const fallbackEmbedding = 'text-embedding-nomic-embed-text-v1.5';
+
+  if (modelIds.includes(desiredEmbedding)) {
+    return { embeddingModel: desiredEmbedding, fallbackUsed: false };
+  }
+
+  if (desiredEmbedding === 'text-embedding-mxbai-embed-large-v1' && modelIds.includes(fallbackEmbedding)) {
+    console.warn(
+      `[LM Studio] Embedding model ${desiredEmbedding} not available; falling back to ${fallbackEmbedding}.`
+    );
+    CONFIG.lmStudio.embeddingModel = fallbackEmbedding;
+    return { embeddingModel: fallbackEmbedding, fallbackUsed: true };
+  }
+
+  throw new Error(`Embedding model ${desiredEmbedding} not available in LM Studio`);
 }
 
 async function startup() {
   await loadSystemPrompt();
+  validateLMStudioEndpoint();
   openaiClient = createOpenAIClient();
-  await verifyLMStudio(openaiClient);
-  await ingestDocuments(db, openaiClient);
-  console.log(`Using chat model ${CONFIG.lmStudio.chatModel} with context window ${CONFIG.contextWindow}.`);
-  console.log(`Using embedding model ${CONFIG.lmStudio.embeddingModel}.`);
+  const { embeddingModel, fallbackUsed } = await verifyLMStudio(openaiClient);
+  await warmUpModels(openaiClient);
+  indexingState.state = 'indexing';
+  indexingState.currentFile = 'initial-scan';
+  const results = await ingestDocuments(db, openaiClient);
+  indexingState.lastResult = { filename: 'initial-scan', status: 'completed', results, completedAt: Date.now() };
+  indexingState.state = 'idle';
+  indexingState.currentFile = null;
+  console.log('[LLM] Chat model pinned:', CONFIG.lmStudio.chatModel);
+  console.log('[LLM] Embedding model pinned:', embeddingModel);
+  if (fallbackUsed) {
+    console.log('[LLM] Embedding model fallback in use; update LM Studio to restore preferred model.');
+  }
+  console.log('[RAG] Embedding engine ready');
 }
 
 startup()
   .then(() => {
+    startFileWatcher();
     app.listen(CONFIG.port, () => {
       console.log(`Backend running on port ${CONFIG.port}`);
     });
@@ -91,6 +132,43 @@ function generateToken() {
   return crypto.randomBytes(24).toString('base64url');
 }
 
+let processingQueue = false;
+
+async function processQueue() {
+  if (processingQueue) return;
+  processingQueue = true;
+  while (pendingFiles.size > 0) {
+    const [next] = pendingFiles;
+    pendingFiles.delete(next);
+    indexingState.state = 'indexing';
+    indexingState.currentFile = next;
+    try {
+      const result = await ingestDocument(db, openaiClient, next);
+      indexingState.lastResult = { ...result, completedAt: Date.now() };
+      console.log(`Indexed ${next}: ${result.status}`);
+    } catch (err) {
+      indexingState.lastResult = { filename: next, status: 'error', error: err.message, completedAt: Date.now() };
+      console.error(`Failed to index ${next}:`, err.message);
+    }
+    indexingState.state = 'idle';
+    indexingState.currentFile = null;
+  }
+  processingQueue = false;
+}
+
+function enqueueFile(filename) {
+  if (!filename.toLowerCase().endsWith('.pdf')) return;
+  pendingFiles.add(path.basename(filename));
+  processQueue();
+}
+
+function startFileWatcher() {
+  const watcher = chokidar.watch(CONFIG.filesDir, { ignoreInitial: true, depth: 0 });
+  watcher.on('add', enqueueFile);
+  watcher.on('change', enqueueFile);
+  console.log(`Watching ${CONFIG.filesDir} for new or updated PDFs...`);
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
@@ -99,6 +177,16 @@ app.post('/api/token', (req, res) => {
   const token = generateToken();
   upsertConversation(db, token);
   res.json({ token });
+});
+
+app.get('/api/indexing/status', (req, res) => {
+  res.json({
+    state: indexingState.state,
+    currentFile: indexingState.currentFile,
+    queue: Array.from(pendingFiles),
+    lastResult: indexingState.lastResult,
+    recentJobs: getRecentIndexingJobs(db, 15)
+  });
 });
 
 app.get('/api/conversation/:token', (req, res) => {
@@ -116,7 +204,7 @@ app.post('/api/chat', async (req, res) => {
   const history = listMessages(db, token);
   const userMessage = addMessage(db, token, 'user', message);
   try {
-    const { contextChunks, sources } = await retrieveContext(db, openaiClient, message);
+    const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message);
 
     const systemTokens = estimateTokens(systemPrompt);
     const userTokens = estimateTokens(message);
@@ -158,6 +246,20 @@ app.post('/api/chat', async (req, res) => {
     const finalHistory = trimmedHistory.map(({ tokens, ...rest }) => rest);
     const finalContextText = selectedContext.map((chunk) => chunk.text).join('\n\n');
     const finalSources = sources.slice(0, selectedContext.length);
+
+    if (selectedContext.length === 0) {
+      const noDataReply =
+        maxScore === null
+          ? 'I could not find any indexed documents yet. Please add the relevant PDFs to /files-for-uploading so I can help.'
+          : 'I could not find relevant information for that request in the indexed PDFs. Please verify the product name or upload the corresponding documentation.';
+      const aiMessage = addMessage(db, token, 'assistant', noDataReply);
+      logInteraction(db, token, userMessage.id, aiMessage.id, {
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+        ragSources: JSON.stringify([])
+      });
+      return res.json({ reply: noDataReply, sources: [] });
+    }
 
     console.log(
       JSON.stringify(

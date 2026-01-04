@@ -14,17 +14,18 @@ export const CONFIG = {
   lmStudio: {
     baseURL: process.env.LM_STUDIO_BASE_URL || 'http://localhost:1234/v1',
     chatModel: process.env.LM_STUDIO_CHAT_MODEL || 'qwen/qwen3-vl-8b',
-    embeddingModel: process.env.LM_STUDIO_EMBEDDING_MODEL || 'text-embedding-3-large'
+    embeddingModel: process.env.LM_STUDIO_EMBEDDING_MODEL || 'text-embedding-nomic-embed-text-v1.5'
   },
   retrieval: {
     chunkSize: 800,
     chunkOverlap: 100,
-    topK: 5
+    topK: 5,
+    minScore: parseFloat(process.env.RETRIEVAL_MIN_SCORE || '0.25')
   }
 };
 
 export function ensureDirectories() {
-  [path.dirname(CONFIG.dbFile), CONFIG.logDir].forEach((dir) => {
+  [path.dirname(CONFIG.dbFile), CONFIG.logDir, CONFIG.filesDir].forEach((dir) => {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }

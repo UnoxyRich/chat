@@ -10,11 +10,11 @@ export const CONFIG = {
   logDir: path.join(rootDir, 'logs'),
   port: process.env.PORT || 3000,
   contextWindow: 262144,
-  outputTokenCap: parseInt(process.env.MAX_OUTPUT_TOKENS || '4096', 10),
+  outputTokenCap: parseInt(process.env.MAX_OUTPUT_TOKENS || '40960', 10),
   lmStudio: {
     baseURL: process.env.LM_STUDIO_BASE_URL || 'http://localhost:1234/v1',
     chatModel: process.env.LM_STUDIO_CHAT_MODEL || 'qwen/qwen3-vl-8b',
-    embeddingModel: process.env.LM_STUDIO_EMBEDDING_MODEL || 'text-embedding-mxbai-embed-large-v1'
+    embeddingModel: process.env.LM_STUDIO_EMBEDDING_MODEL || 'text-embedding-nomic-embed-text-v1.5'
   },
   retrieval: {
     chunkSize: 800,

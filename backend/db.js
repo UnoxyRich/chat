@@ -97,6 +97,14 @@ export function logInteraction(db, conversationId, userMessageId, aiMessageId, m
   ).run(conversationId, userMessageId, aiMessageId, ip || null, userAgent || null, ragSources || null, Date.now());
 }
 
+export function resetRagData(db) {
+  db.exec(`
+    DELETE FROM embeddings;
+    DELETE FROM documents;
+    DELETE FROM indexing_jobs;
+  `);
+}
+
 export function replaceDocumentMetadata(db, filename, mtime, hash) {
   const existing = db.prepare('SELECT id FROM documents WHERE filename = ?').get(filename);
   const now = Date.now();

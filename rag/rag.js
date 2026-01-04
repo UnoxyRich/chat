@@ -8,7 +8,6 @@ import {
   replaceDocumentMetadata,
   storeEmbeddingChunk,
   getAllEmbeddings,
-  getDocumentByFilename,
   startIndexingJob,
   completeIndexingJob,
   failIndexingJob
@@ -73,11 +72,6 @@ export async function ingestDocument(db, client, filename) {
   const stat = fs.statSync(fullPath);
   const buffer = fs.readFileSync(fullPath);
   const hash = hashBuffer(buffer);
-  const existing = getDocumentByFilename(db, filename);
-  if (existing && existing.hash === hash && existing.mtime === stat.mtimeMs) {
-    console.log(`[RAG] Skipping unchanged document ${filename}`);
-    return { filename, status: 'skipped' };
-  }
 
   const jobId = startIndexingJob(db, filename, stat.mtimeMs, hash);
   try {

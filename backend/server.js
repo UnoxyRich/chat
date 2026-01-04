@@ -48,6 +48,7 @@ const CONTEXT_TOKEN_BUDGET = 20000;
 const PROMPT_TOKEN_BUDGET = 30000;
 const MAX_COMPLETION_ATTEMPTS = 2;
 const MIN_RETRY_TOKEN_BUFFER = 1024;
+const MAX_HISTORY_MESSAGES = 6;
 
 function estimateTokens(text) {
   if (!text) return 0;
@@ -137,13 +138,23 @@ function detectLanguage(text) {
   return 'en';
 }
 
-function buildMessages(context, userInput, language) {
+function getInstructionTexts(language) {
   const safetyInstruction =
     'Use only the provided RAG context to answer. If the context is missing or insufficient, say you cannot find the information and ask for a specific product name or documentation. Never invent details.';
   const languageInstruction =
     language === 'zh'
       ? '请使用用户提问的语言进行回答，若缺少上下文，请礼貌告知无法找到相关信息，不要猜测。'
-      : 'Respond in the user\'s language. If you lack sufficient context, politely state that and do not guess.';
+      : "Respond in the user's language. If you lack sufficient context, politely state that and do not guess.";
+  return { safetyInstruction, languageInstruction };
+}
+
+function getTrimmedHistory(conversationId) {
+  const history = listMessages(db, conversationId);
+  return history.slice(-MAX_HISTORY_MESSAGES).map(({ role, content }) => ({ role, content }));
+}
+
+function buildMessages(context, history, language) {
+  const { safetyInstruction, languageInstruction } = getInstructionTexts(language);
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'system', content: safetyInstruction },
@@ -152,7 +163,9 @@ function buildMessages(context, userInput, language) {
   if (context) {
     messages.push({ role: 'system', content: `RAG context:\n${context}` });
   }
-  messages.push({ role: 'user', content: userInput });
+  history.forEach((msg) => {
+    messages.push({ role: msg.role, content: msg.content });
+  });
   return messages;
 }
 
@@ -180,8 +193,12 @@ async function generateCompletionWithRecovery(messages, initialMaxTokens) {
       const completion = await openaiClient.chat.completions.create({
         model: CONFIG.lmStudio.chatModel,
         messages,
-        max_tokens: maxTokens
+        max_tokens: maxTokens,
+        stream: false
       });
+      if (!completion?.choices?.length) {
+        throw new Error('LM Studio returned no choices');
+      }
       const { content, finishReason, invalid } = analyzeCompletion(completion);
       if (!invalid) {
         return { replyText: content, finishReason };
@@ -315,13 +332,19 @@ app.post('/api/chat', async (req, res) => {
     const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message);
     console.log(`[RAG] Retrieved ${contextChunks.length} chunks for query (max score: ${maxScore ?? 'n/a'})`);
 
-    const systemTokens = estimateTokens(systemPrompt) + estimateTokens(greetingReply) + 50;
-    const userTokens = estimateTokens(message);
+    const historyMessages = getTrimmedHistory(token);
+    const { safetyInstruction, languageInstruction } = getInstructionTexts(language);
+    const systemTokens =
+      estimateTokens(systemPrompt) +
+      estimateTokens(safetyInstruction) +
+      estimateTokens(languageInstruction) +
+      50;
+    const conversationTokens = historyMessages.reduce((sum, msg) => sum + estimateTokens(msg.content), 0);
     let selectedContext = contextChunks.map((chunk) => ({ ...chunk, tokens: estimateTokens(chunk.text) }));
 
     const computeReserved = (contextMsgs) => {
       const contextTokens = contextMsgs.reduce((sum, chunk) => sum + chunk.tokens, 0);
-      return systemTokens + userTokens + contextTokens;
+      return systemTokens + conversationTokens + contextTokens;
     };
 
     let reservedTokens = computeReserved(selectedContext);
@@ -336,11 +359,11 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const remainingForGeneration = PROMPT_TOKEN_BUDGET - reservedTokens;
-    const maxGenerationTokens = Math.min(CONFIG.outputTokenCap, remainingForGeneration);
-
-    if (maxGenerationTokens <= 0) {
-      throw new Error('No tokens available for generation after budgeting.');
+    if (remainingForGeneration < CONFIG.minCompletionTokens) {
+      throw new Error('Insufficient tokens available for generation (requires at least 1024 tokens).');
     }
+
+    const maxGenerationTokens = Math.min(CONFIG.outputTokenCap, remainingForGeneration);
 
     const finalContextText = selectedContext.map((chunk) => chunk.text).join('\n\n');
     const finalSources = sources.slice(0, selectedContext.length);
@@ -366,7 +389,7 @@ app.post('/api/chat', async (req, res) => {
           reservedTokens,
           maxGenerationTokens,
           systemTokens,
-          userTokens,
+          conversationTokens,
           contextTokens: selectedContext.reduce((sum, chunk) => sum + chunk.tokens, 0)
         },
         null,
@@ -374,8 +397,11 @@ app.post('/api/chat', async (req, res) => {
       )
     );
 
-    const messages = buildMessages(finalContextText, message, language);
-    const { replyText } = await generateCompletionWithRecovery(messages, maxGenerationTokens);
+    const messages = buildMessages(finalContextText, historyMessages, language);
+    let { replyText } = await generateCompletionWithRecovery(messages, maxGenerationTokens);
+    if (!replyText || replyText.trim().length === 0) {
+      replyText = '⚠️ The system generated no response. Please retry.';
+    }
     const aiMessage = addMessage(db, token, 'assistant', replyText);
     logInteraction(db, token, userMessage.id, aiMessage.id, {
       ip: req.ip,

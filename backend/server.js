@@ -50,6 +50,8 @@ const MAX_COMPLETION_ATTEMPTS = 2;
 const MIN_RETRY_TOKEN_BUFFER = 1024;
 const MAX_HISTORY_MESSAGES = 6;
 const DEFAULT_REQUEST_ID_PREFIX = 'chat';
+const STREAM_EVENT_CONTENT_TYPE = 'text/event-stream';
+const STREAM_EVENT_PREFIX = 'data: ';
 
 function estimateTokens(text) {
   if (!text) return 0;
@@ -58,6 +60,17 @@ function estimateTokens(text) {
 
 function createRequestId(prefix = DEFAULT_REQUEST_ID_PREFIX) {
   return `${prefix}-${crypto.randomBytes(6).toString('hex')}`;
+}
+
+function setEventStreamHeaders(res) {
+  res.setHeader('Content-Type', STREAM_EVENT_CONTENT_TYPE);
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+}
+
+function writeStreamEvent(res, payload) {
+  res.write(`${STREAM_EVENT_PREFIX}${JSON.stringify(payload)}\n\n`);
 }
 
 async function loadSystemPrompt() {
@@ -186,6 +199,125 @@ function analyzeCompletion(completion) {
     finishReason,
     invalid: !hasContent || invalidFinishReason || missingFinishReason
   };
+}
+
+async function streamCompletionWithRecovery(messages, initialMaxTokens, requestId, onToken) {
+  let attempt = 0;
+  let maxTokens = initialMaxTokens;
+  let lastError = null;
+
+  while (attempt < MAX_COMPLETION_ATTEMPTS) {
+    let collected = '';
+    let tokenCount = 0;
+    let firstTokenLatencyMs = null;
+    const start = Date.now();
+
+    try {
+      console.log(
+        JSON.stringify(
+          { event: 'stream_start', requestId, attempt: attempt + 1, maxTokens, model: CONFIG.lmStudio.chatModel },
+          null,
+          2
+        )
+      );
+      const stream = await openaiClient.chat.completions.create({
+        model: CONFIG.lmStudio.chatModel,
+        messages,
+        max_tokens: maxTokens,
+        stream: true
+      });
+
+      let lastFinishReason = null;
+      for await (const part of stream) {
+        const delta = part?.choices?.[0]?.delta?.content;
+        const finishReason = part?.choices?.[0]?.finish_reason || part?.choices?.[0]?.finishReason;
+        if (delta) {
+          collected += delta;
+          tokenCount += 1;
+          if (firstTokenLatencyMs === null) {
+            firstTokenLatencyMs = Date.now() - start;
+            console.log(
+              JSON.stringify(
+                { event: 'stream_first_token', requestId, attempt: attempt + 1, latencyMs: firstTokenLatencyMs },
+                null,
+                2
+              )
+            );
+          }
+          onToken(delta);
+        }
+        if (finishReason) {
+          lastFinishReason = finishReason;
+        }
+      }
+
+      console.log(
+        JSON.stringify(
+          {
+            event: 'stream_end',
+            requestId,
+            attempt: attempt + 1,
+            tokenCount,
+            durationMs: Date.now() - start,
+            firstTokenLatencyMs,
+            finishReason: lastFinishReason || 'unknown'
+          },
+          null,
+          2
+        )
+      );
+
+      if (collected.length > 0) {
+        return {
+          replyText: collected,
+          finishReason: lastFinishReason || 'streamed',
+          tokenCount,
+          firstTokenLatencyMs,
+          interrupted: false
+        };
+      }
+
+      lastError = new Error('Stream returned no tokens');
+    } catch (err) {
+      if (collected.length > 0) {
+        console.warn(
+          JSON.stringify(
+            {
+              event: 'stream_error_after_tokens',
+              requestId,
+              attempt: attempt + 1,
+              tokenCount,
+              message: err.message
+            },
+            null,
+            2
+          )
+        );
+        return {
+          replyText: collected,
+          finishReason: 'error',
+          tokenCount,
+          firstTokenLatencyMs,
+          interrupted: true
+        };
+      }
+      lastError = err;
+    }
+
+    attempt += 1;
+    if (attempt >= MAX_COMPLETION_ATTEMPTS) {
+      break;
+    }
+
+    maxTokens = Math.min(CONFIG.outputTokenCap, Math.max(Math.floor(maxTokens * 2), maxTokens + MIN_RETRY_TOKEN_BUFFER));
+    console.warn(
+      `[LLM] Regenerating streamed response (requestId=${requestId}, attempt ${attempt + 1}) with max_tokens=${maxTokens} after issue: ${
+        lastError?.message
+      }`
+    );
+  }
+
+  throw lastError || new Error('LLM stream was empty or invalid after retries');
 }
 
 async function generateCompletionWithRecovery(messages, initialMaxTokens, requestId = 'chat-unknown') {
@@ -330,6 +462,7 @@ app.post('/api/chat', async (req, res) => {
   if (!token || !message) {
     return res.status(400).json({ error: 'token and message are required' });
   }
+  setEventStreamHeaders(res);
   const requestId = createRequestId();
   console.log(
     JSON.stringify(
@@ -351,6 +484,17 @@ app.post('/api/chat', async (req, res) => {
   const greetingReply =
     language === 'zh' ? '你好！很高兴和你交流，我可以怎样帮助你？' : 'Hello! How can I help you today?';
 
+  const streamState = { streamedText: '', sources: [], usedFallback: false };
+  const pushToken = (tokenText) => {
+    if (!tokenText) return;
+    streamState.streamedText += tokenText;
+    writeStreamEvent(res, { type: 'token', token: tokenText });
+  };
+  const endStream = (payload = {}) => {
+    writeStreamEvent(res, { type: 'done', ...payload });
+    res.end();
+  };
+
   if (isGreeting(message)) {
     const aiMessage = addMessage(db, token, 'assistant', greetingReply);
     logInteraction(db, token, userMessage.id, aiMessage.id, {
@@ -365,11 +509,13 @@ app.post('/api/chat', async (req, res) => {
         2
       )
     );
-    return res.json({ reply: greetingReply, sources: [] });
+    pushToken(greetingReply);
+    endStream({ sources: [], finishReason: 'greeting' });
+    return;
   }
 
   try {
-    const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message, requestId);
+    const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message, requestId, { language });
     console.log(`[RAG] Retrieved ${contextChunks.length} chunks for query (max score: ${maxScore ?? 'n/a'})`);
 
     const historyMessages = getTrimmedHistory(token);
@@ -432,7 +578,9 @@ app.post('/api/chat', async (req, res) => {
           2
         )
       );
-      return res.json({ reply: noDataReply, sources: [] });
+      pushToken(noDataReply);
+      endStream({ sources: [], finishReason: 'no_context' });
+      return;
     }
 
     console.log(
@@ -457,11 +605,14 @@ app.post('/api/chat', async (req, res) => {
       messages: messages.map((msg) => ({ role: msg.role, length: msg.content?.length || 0 }))
     };
     console.log(JSON.stringify({ event: 'prompt_structure', requestId, ...promptSummary }, null, 2));
-    let { replyText } = await generateCompletionWithRecovery(messages, maxGenerationTokens, requestId);
-    if (!replyText || replyText.trim().length === 0) {
-      replyText = '⚠️ The system generated no response. Please retry.';
-    }
-    const aiMessage = addMessage(db, token, 'assistant', replyText);
+    const { replyText, interrupted, finishReason } = await streamCompletionWithRecovery(
+      messages,
+      maxGenerationTokens,
+      requestId,
+      pushToken
+    );
+    const finalReply = replyText && replyText.trim().length > 0 ? replyText : streamState.streamedText;
+    const aiMessage = addMessage(db, token, 'assistant', finalReply);
     logInteraction(db, token, userMessage.id, aiMessage.id, {
       ip: req.ip,
       userAgent: req.get('user-agent'),
@@ -473,18 +624,28 @@ app.post('/api/chat', async (req, res) => {
           event: 'http_response',
           requestId,
           type: 'chat_success',
-          replyLength: replyText.length,
+          replyLength: finalReply.length,
           sourcesCount: finalSources.length,
-          replyPreview: replyText.slice(0, 200)
+          replyPreview: finalReply.slice(0, 200),
+          stream: {
+            tokenCount: streamState.streamedText.length,
+            finishReason: finishReason || 'streamed',
+            interrupted: Boolean(interrupted)
+          }
         },
         null,
         2
       )
     );
-    res.json({ reply: replyText, sources: finalSources });
+    endStream({ sources: finalSources, finishReason: finishReason || 'streamed', interrupted: Boolean(interrupted) });
   } catch (err) {
     console.error('Chat error', err.message, { requestId });
-    const fallbackReply = buildFallbackReply(language);
+    let fallbackReply = streamState.streamedText;
+    if (!fallbackReply) {
+      fallbackReply = buildFallbackReply(language);
+      streamState.usedFallback = true;
+      pushToken(fallbackReply);
+    }
     const aiMessage = addMessage(db, token, 'assistant', fallbackReply);
     logInteraction(db, token, userMessage.id, aiMessage.id, {
       ip: req.ip,
@@ -498,13 +659,14 @@ app.post('/api/chat', async (req, res) => {
           requestId,
           type: 'chat_fallback',
           replyLength: fallbackReply.length,
-          replyPreview: fallbackReply.slice(0, 200)
+          replyPreview: fallbackReply.slice(0, 200),
+          streamFallbackUsed: streamState.usedFallback
         },
         null,
         2
       )
     );
-    res.status(200).json({ reply: fallbackReply, sources: [] });
+    endStream({ sources: [], finishReason: 'fallback', streamFallbackUsed: streamState.usedFallback });
   }
 });
 

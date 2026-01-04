@@ -11,10 +11,18 @@ import {
   addMessage,
   listMessages,
   logInteraction,
-  getRecentIndexingJobs,
-  resetRagData
+  listConversations,
+  getRecentIndexingJobs
 } from './db.js';
-import { ingestDocuments, retrieveContext, createOpenAIClient } from '../rag/rag.js';
+import chokidar from 'chokidar';
+import {
+  ingestDocuments,
+  ingestDocument,
+  retrieveContext,
+  createOpenAIClient,
+  warmUpModels,
+  validateLMStudioEndpoint
+} from '../rag/rag.js';
 
 const app = express();
 app.use(cors());
@@ -27,13 +35,10 @@ ensureDirectories();
 const db = initDatabase();
 let systemPrompt = '';
 let openaiClient = null;
-const ragState = {
-  state: 'indexing',
+const pendingFiles = new Set();
+const indexingState = {
+  state: 'idle',
   currentFile: null,
-  totalFiles: 0,
-  processedFiles: 0,
-  totalChunks: 0,
-  error: null,
   lastResult: null
 };
 
@@ -48,84 +53,86 @@ async function loadSystemPrompt() {
   systemPrompt = fs.readFileSync(CONFIG.systemPromptPath, 'utf-8');
 }
 
-async function verifyLMStudio(client) {
-  try {
-    const res = await client.models.list();
-    const modelIds = res.data.map((m) => m.id);
-    if (!modelIds.includes(CONFIG.lmStudio.chatModel)) {
-      throw new Error(`Configured chat model ${CONFIG.lmStudio.chatModel} not found in LM Studio.`);
-    }
+function resolveEmbeddingModel(modelIds) {
+  const configuredEmbedding = CONFIG.lmStudio.embeddingModel;
+  const preferredEmbedding =
+    configuredEmbedding === 'text-embedding-3-large'
+      ? 'text-embedding-mxbai-embed-large-v1'
+      : configuredEmbedding;
+  const fallbackEmbedding = 'text-embedding-nomic-embed-text-v1.5';
 
-    if (!modelIds.includes(CONFIG.lmStudio.embeddingModel)) {
-      const preferredEmbedding = modelIds.find((id) => id !== CONFIG.lmStudio.chatModel && id.toLowerCase().includes('embed'));
-      const alternative = preferredEmbedding || modelIds.find((id) => id !== CONFIG.lmStudio.chatModel) || CONFIG.lmStudio.chatModel;
-      CONFIG.lmStudio.embeddingModel = alternative;
-      console.warn(
-        `Configured embedding model not found. Using ${CONFIG.lmStudio.embeddingModel}${
-          alternative === CONFIG.lmStudio.chatModel ? ' (chat model fallback)' : ''
-        }.`
-      );
-    }
-  } catch (err) {
-    console.error('Failed to connect to LM Studio', err.message);
-    throw new Error('LM Studio is not reachable');
+  const remapped = configuredEmbedding === 'text-embedding-3-large';
+  if (remapped) {
+    console.warn(
+      `[LM Studio] Embedding model ${configuredEmbedding} is deprecated; attempting ${preferredEmbedding} instead.`
+    );
   }
+
+  if (modelIds.includes(preferredEmbedding)) {
+    return { embeddingModel: preferredEmbedding, fallbackUsed: false, remapped };
+  }
+
+  if (preferredEmbedding === 'text-embedding-mxbai-embed-large-v1' && modelIds.includes(fallbackEmbedding)) {
+    console.warn(
+      `[LM Studio] Embedding model ${preferredEmbedding} not available; falling back to ${fallbackEmbedding}.`
+    );
+    return { embeddingModel: fallbackEmbedding, fallbackUsed: true, remapped };
+  }
+
+  throw new Error(`Embedding model ${preferredEmbedding} not available in LM Studio`);
 }
 
-async function rebuildRagIndex() {
-  ragState.state = 'indexing';
-  ragState.error = null;
-  ragState.currentFile = null;
-  ragState.processedFiles = 0;
-  ragState.totalChunks = 0;
-  ragState.lastResult = null;
-
-  console.log('[rag] rebuilding index from scratch');
-  resetRagData(db);
-
-  const files = fs.readdirSync(CONFIG.filesDir).filter((file) => file.toLowerCase().endsWith('.pdf'));
-  ragState.totalFiles = files.length;
-  console.log(`[rag] scanning files-for-uploading (${files.length} files)`);
-
-  const { results, processedFiles, totalChunks, totalFiles } = await ingestDocuments(db, openaiClient, {
-    onFileStart: (filename) => {
-      ragState.currentFile = filename;
-      console.log(`[rag] embedding file: ${filename}`);
-    }
-  });
-
-  ragState.currentFile = null;
-  ragState.processedFiles = processedFiles;
-  ragState.totalChunks = totalChunks;
-  ragState.lastResult = results[results.length - 1] || null;
-
-  results
-    .filter((item) => item.status === 'error')
-    .forEach((item) => console.error(`[rag] failed to embed ${item.filename}: ${item.error}`));
-
-  console.log(`[rag] completed: ${processedFiles} files, ${totalChunks} chunks`);
-  const allFailed = totalFiles > 0 && processedFiles === 0;
-  if (allFailed) {
-    ragState.state = 'error';
-    ragState.error = 'No documents indexed successfully';
-  } else {
-    ragState.state = 'ready';
-    ragState.error = null;
+async function verifyLMStudio(client) {
+  let modelIds;
+  try {
+    const res = await client.models.list();
+    modelIds = res.data.map((m) => m.id);
+  } catch (err) {
+    console.error('Failed to connect to LM Studio', err.message);
+    throw new Error(`LM Studio is not reachable at ${CONFIG.lmStudio.baseURL}: ${err.message}`);
   }
-  console.log(`[rag] status: ${ragState.state}`);
+
+  if (!modelIds.includes(CONFIG.lmStudio.chatModel)) {
+    throw new Error(`Chat model ${CONFIG.lmStudio.chatModel} not available in LM Studio`);
+  }
+
+  const { embeddingModel, fallbackUsed, remapped } = resolveEmbeddingModel(modelIds);
+  CONFIG.lmStudio.embeddingModel = embeddingModel;
+  return { embeddingModel, fallbackUsed, remapped };
 }
 
 async function startup() {
   await loadSystemPrompt();
+  validateLMStudioEndpoint();
   openaiClient = createOpenAIClient();
-  await verifyLMStudio(openaiClient);
-  await rebuildRagIndex();
-  console.log(`Using chat model ${CONFIG.lmStudio.chatModel} with context window ${CONFIG.contextWindow}.`);
-  console.log(`Using embedding model ${CONFIG.lmStudio.embeddingModel}.`);
+  const { embeddingModel, fallbackUsed, remapped } = await verifyLMStudio(openaiClient);
+  await warmUpModels(openaiClient);
+  indexingState.state = 'indexing';
+  indexingState.currentFile = 'initial-scan';
+  console.log('[RAG] Initial ingestion starting');
+  const results = await ingestDocuments(db, openaiClient);
+  if (!results.length) {
+    throw new Error(
+      `No PDFs found in ${CONFIG.filesDir}. Place the knowledge base PDFs there so embeddings can be generated.`
+    );
+  }
+  indexingState.lastResult = { filename: 'initial-scan', status: 'completed', results, completedAt: Date.now() };
+  indexingState.state = 'idle';
+  indexingState.currentFile = null;
+  console.log('[LLM] Chat model pinned:', CONFIG.lmStudio.chatModel);
+  console.log('[LLM] Embedding model pinned:', embeddingModel);
+  if (remapped) {
+    console.log('[LLM] Embedding model remapped from text-embedding-3-large to preferred option.');
+  }
+  if (fallbackUsed) {
+    console.log('[LLM] Embedding model fallback in use; update LM Studio to restore preferred model.');
+  }
+  console.log('[RAG] Embedding engine ready');
 }
 
 startup()
   .then(() => {
+    startFileWatcher();
     app.listen(CONFIG.port, () => {
       console.log(`Backend running on port ${CONFIG.port}`);
     });
@@ -135,20 +142,77 @@ startup()
     process.exit(1);
   });
 
-function buildMessages(history, context, userInput) {
-  const messages = [{ role: 'system', content: systemPrompt }];
+function isGreeting(text) {
+  const normalized = text.trim().toLowerCase().replace(/[!,.。！？]/g, '');
+  const greetings = ['hi', 'hello', 'hey', 'hola', '你好', '您好'];
+  return greetings.includes(normalized);
+}
+
+function detectLanguage(text) {
+  if (/[^\x00-\x7F]/.test(text) && /[\u4e00-\u9fff]/.test(text)) {
+    return 'zh';
+  }
+  return 'en';
+}
+
+function buildMessages(context, userInput, language) {
+  const safetyInstruction =
+    'Use only the provided RAG context to answer. If the context is missing or insufficient, say you cannot find the information and ask for a specific product name or documentation. Never invent details.';
+  const languageInstruction =
+    language === 'zh'
+      ? '请使用用户提问的语言进行回答，若缺少上下文，请礼貌告知无法找到相关信息，不要猜测。'
+      : 'Respond in the user\'s language. If you lack sufficient context, politely state that and do not guess.';
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'system', content: safetyInstruction },
+    { role: 'system', content: languageInstruction }
+  ];
   if (context) {
     messages.push({ role: 'system', content: `RAG context:\n${context}` });
   }
-  history.forEach((msg) => {
-    messages.push({ role: msg.role, content: msg.content });
-  });
   messages.push({ role: 'user', content: userInput });
   return messages;
 }
 
 function generateToken() {
   return crypto.randomBytes(24).toString('base64url');
+}
+
+let processingQueue = false;
+
+async function processQueue() {
+  if (processingQueue) return;
+  processingQueue = true;
+  while (pendingFiles.size > 0) {
+    const [next] = pendingFiles;
+    pendingFiles.delete(next);
+    indexingState.state = 'indexing';
+    indexingState.currentFile = next;
+    try {
+      const result = await ingestDocument(db, openaiClient, next);
+      indexingState.lastResult = { ...result, completedAt: Date.now() };
+      console.log(`Indexed ${next}: ${result.status}`);
+    } catch (err) {
+      indexingState.lastResult = { filename: next, status: 'error', error: err.message, completedAt: Date.now() };
+      console.error(`Failed to index ${next}:`, err.message);
+    }
+    indexingState.state = 'idle';
+    indexingState.currentFile = null;
+  }
+  processingQueue = false;
+}
+
+function enqueueFile(filename) {
+  if (!filename.toLowerCase().endsWith('.pdf')) return;
+  pendingFiles.add(path.basename(filename));
+  processQueue();
+}
+
+function startFileWatcher() {
+  const watcher = chokidar.watch(CONFIG.filesDir, { ignoreInitial: true, depth: 0 });
+  watcher.on('add', enqueueFile);
+  watcher.on('change', enqueueFile);
+  console.log(`Watching ${CONFIG.filesDir} for new or updated PDFs...`);
 }
 
 app.get('/health', (req, res) => {
@@ -163,16 +227,26 @@ app.post('/api/token', (req, res) => {
 
 app.get('/api/indexing/status', (req, res) => {
   res.json({
-    ...ragState,
+    state: indexingState.state,
+    currentFile: indexingState.currentFile,
+    queue: Array.from(pendingFiles),
+    lastResult: indexingState.lastResult,
     recentJobs: getRecentIndexingJobs(db, 15)
   });
 });
 
 app.get('/api/conversation/:token', (req, res) => {
   const { token } = req.params;
+  upsertConversation(db, token);
   const messages = listMessages(db, token);
   res.json({ messages });
 });
+
+app.get('/api/conversations', (req, res) => {
+  const conversations = listConversations(db, 100);
+  res.json({ conversations });
+});
+
 
 app.post('/api/chat', async (req, res) => {
   const { token, message } = req.body;
@@ -180,78 +254,80 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: 'token and message are required' });
   }
   upsertConversation(db, token);
-  const history = listMessages(db, token);
   const userMessage = addMessage(db, token, 'user', message);
+  const language = detectLanguage(message);
+  const greetingReply =
+    language === 'zh' ? '你好！很高兴和你交流，我可以怎样帮助你？' : 'Hello! How can I help you today?';
+
+  if (isGreeting(message)) {
+    const aiMessage = addMessage(db, token, 'assistant', greetingReply);
+    logInteraction(db, token, userMessage.id, aiMessage.id, {
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      ragSources: JSON.stringify([])
+    });
+    return res.json({ reply: greetingReply, sources: [] });
+  }
+
   try {
-    if (ragState.state === 'indexing') {
-      return res.status(503).json({ error: 'Knowledge base is still indexing. Please try again shortly.' });
-    }
+    const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message);
+    console.log(`[RAG] Retrieved ${contextChunks.length} chunks for query (max score: ${maxScore ?? 'n/a'})`);
 
-    if (ragState.state === 'error' || ragState.totalChunks === 0) {
-      const replyText =
-        'No documents are available in the knowledge base right now. Please add PDFs to /files-for-uploading and restart the server to rebuild the index.';
-      const aiMessage = addMessage(db, token, 'assistant', replyText);
-      logInteraction(db, token, userMessage.id, aiMessage.id, {
-        ip: req.ip,
-        userAgent: req.get('user-agent'),
-        ragSources: JSON.stringify([])
-      });
-      return res.json({ reply: replyText, sources: [] });
-    }
-
-    const { contextChunks, sources } = await retrieveContext(db, openaiClient, message);
-
-    const systemTokens = estimateTokens(systemPrompt);
+    const systemTokens = estimateTokens(systemPrompt) + estimateTokens(greetingReply) + 50;
     const userTokens = estimateTokens(message);
-    const historyWithTokens = history.map((msg) => ({ ...msg, tokens: estimateTokens(msg.content) }));
-    let trimmedHistory = [...historyWithTokens];
-
     let selectedContext = contextChunks.map((chunk) => ({ ...chunk, tokens: estimateTokens(chunk.text) }));
 
-    const computeReserved = (historyMsgs, contextMsgs) => {
-      const historyTokens = historyMsgs.reduce((sum, msg) => sum + msg.tokens, 0);
+    const CONTEXT_TOKEN_BUDGET = 2000;
+    const PROMPT_TOKEN_BUDGET = 3000;
+
+    const computeReserved = (contextMsgs) => {
       const contextTokens = contextMsgs.reduce((sum, chunk) => sum + chunk.tokens, 0);
-      return systemTokens + userTokens + historyTokens + contextTokens;
+      return systemTokens + userTokens + contextTokens;
     };
 
-    const targetWindow = CONFIG.contextWindow;
-    let reservedTokens = computeReserved(trimmedHistory, selectedContext);
+    let reservedTokens = computeReserved(selectedContext);
 
-    while (reservedTokens >= targetWindow && trimmedHistory.length > 0) {
-      trimmedHistory.shift();
-      reservedTokens = computeReserved(trimmedHistory, selectedContext);
-    }
-
-    while (reservedTokens >= targetWindow && selectedContext.length > 0) {
+    while (reservedTokens > CONTEXT_TOKEN_BUDGET && selectedContext.length > 0) {
       selectedContext.pop();
-      reservedTokens = computeReserved(trimmedHistory, selectedContext);
+      reservedTokens = computeReserved(selectedContext);
     }
 
-    if (reservedTokens >= targetWindow) {
-      throw new Error('Insufficient context window for request even after trimming history and context.');
+    if (reservedTokens >= PROMPT_TOKEN_BUDGET) {
+      throw new Error('Insufficient context window for request even after trimming context.');
     }
 
-    const remainingForGeneration = targetWindow - reservedTokens;
+    const remainingForGeneration = PROMPT_TOKEN_BUDGET - reservedTokens;
     const maxGenerationTokens = Math.min(CONFIG.outputTokenCap, remainingForGeneration);
 
     if (maxGenerationTokens <= 0) {
       throw new Error('No tokens available for generation after budgeting.');
     }
 
-    const finalHistory = trimmedHistory.map(({ tokens, ...rest }) => rest);
     const finalContextText = selectedContext.map((chunk) => chunk.text).join('\n\n');
     const finalSources = sources.slice(0, selectedContext.length);
+
+    if (selectedContext.length === 0) {
+      const noDataReply =
+        language === 'zh'
+          ? '没有找到相关的文档内容。请提供具体的产品名称或上传对应的PDF以便我查阅。'
+          : 'I could not find relevant information in the indexed documents. Please provide the exact product name or upload the related PDF.';
+      const aiMessage = addMessage(db, token, 'assistant', noDataReply);
+      logInteraction(db, token, userMessage.id, aiMessage.id, {
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+        ragSources: JSON.stringify([])
+      });
+      return res.json({ reply: noDataReply, sources: [] });
+    }
 
     console.log(
       JSON.stringify(
         {
           event: 'token_budget',
-          totalContextTokens: reservedTokens,
           reservedTokens,
           maxGenerationTokens,
           systemTokens,
           userTokens,
-          historyTokens: trimmedHistory.reduce((sum, msg) => sum + msg.tokens, 0),
           contextTokens: selectedContext.reduce((sum, chunk) => sum + chunk.tokens, 0)
         },
         null,
@@ -259,7 +335,7 @@ app.post('/api/chat', async (req, res) => {
       )
     );
 
-    const messages = buildMessages(finalHistory, finalContextText, message);
+    const messages = buildMessages(finalContextText, message, language);
     const completion = await openaiClient.chat.completions.create({
       model: CONFIG.lmStudio.chatModel,
       messages,

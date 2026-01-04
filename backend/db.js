@@ -136,6 +136,10 @@ export function getAllEmbeddings(db) {
     .all();
 }
 
+export function countEmbeddings(db) {
+  return db.prepare('SELECT COUNT(*) as count FROM embeddings').get().count;
+}
+
 export function startIndexingJob(db, filename, mtime, hash) {
   const result = db
     .prepare(

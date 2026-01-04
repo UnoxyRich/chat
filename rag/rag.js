@@ -10,7 +10,8 @@ import {
   getAllEmbeddings,
   startIndexingJob,
   completeIndexingJob,
-  failIndexingJob
+  failIndexingJob,
+  countEmbeddings
 } from '../backend/db.js';
 
 function hashBuffer(buffer) {
@@ -51,20 +52,54 @@ function ensureSingleEmbeddingClient(client) {
   return embeddingClientRef;
 }
 
-async function embedBatch(client, texts) {
+async function embedBatch(client, texts, requestId = 'embed-unknown') {
   const embeddingModel = CONFIG.lmStudio.embeddingModel;
   const stableClient = ensureSingleEmbeddingClient(client);
   return queueEmbeddingTask(async () => {
     try {
+      console.log(
+        JSON.stringify(
+          {
+            event: 'embedding_request',
+            requestId,
+            model: embeddingModel,
+            inputCount: Array.isArray(texts) ? texts.length : 0
+          },
+          null,
+          2
+        )
+      );
       const response = await stableClient.embeddings.create({ model: embeddingModel, input: texts });
+      const sampleLength = response?.data?.[0]?.embedding?.length || 0;
+      console.log(
+        JSON.stringify(
+          {
+            event: 'embedding_response',
+            requestId,
+            model: embeddingModel,
+            responseLength: response?.data?.length || 0,
+            embeddingDimensions: sampleLength
+          },
+          null,
+          2
+        )
+      );
       return response.data.map((item) => item.embedding);
     } catch (err) {
+      console.error(
+        JSON.stringify(
+          { event: 'embedding_error', requestId, model: embeddingModel, message: err.message },
+          null,
+          2
+        )
+      );
       throw new Error(`Embedding request failed: ${err.message}`);
     }
   });
 }
 
 export async function ingestDocument(db, client, filename) {
+  const requestId = `ingest-${filename}-${Date.now()}`;
   const fullPath = path.join(CONFIG.filesDir, filename);
   if (!fs.existsSync(fullPath)) {
     throw new Error(`File ${filename} no longer exists`);
@@ -79,11 +114,24 @@ export async function ingestDocument(db, client, filename) {
     const data = await pdf(buffer);
     const chunks = splitText(data.text, CONFIG.retrieval.chunkSize, CONFIG.retrieval.chunkOverlap);
     console.log(`[RAG] Generated ${chunks.length} chunks for ${filename}`);
-    const embeddings = await embedBatch(client, chunks);
+    const embeddings = await embedBatch(client, chunks, requestId);
     const docId = replaceDocumentMetadata(db, filename, stat.mtimeMs, hash);
     embeddings.forEach((embedding, idx) => {
       storeEmbeddingChunk(db, docId, idx, embedding, chunks[idx]);
     });
+    const totalEmbeddings = countEmbeddings(db);
+    console.log(
+      JSON.stringify(
+        {
+          event: 'embedding_store',
+          requestId,
+          storedChunks: embeddings.length,
+          totalVectorsAfterInsert: totalEmbeddings
+        },
+        null,
+        2
+      )
+    );
     console.log(`[RAG] Stored embeddings for ${filename}`);
     completeIndexingJob(db, jobId);
     return { filename, status: 'indexed', chunks: chunks.length };
@@ -133,16 +181,32 @@ function cosineSimilarity(a, b) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export async function retrieveContext(db, client, query) {
+export async function retrieveContext(db, client, query, requestId = 'retrieve-unknown') {
   const rows = getAllEmbeddings(db);
   if (!rows.length) {
     return { contextChunks: [], sources: [], maxScore: null };
   }
 
-  const queryEmbedding = (await embedBatch(client, [query]))[0];
+  const queryEmbedding = (await embedBatch(client, [query], requestId))[0];
   const scored = rows.map((row) => {
     const vector = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
-    const score = cosineSimilarity(queryEmbedding, Array.from(vector));
+    let score = cosineSimilarity(queryEmbedding, Array.from(vector));
+    if (!Number.isFinite(score)) {
+      console.warn(
+        JSON.stringify(
+          {
+            event: 'similarity_score_nan',
+            requestId,
+            filename: row.filename,
+            chunkIndex: row.chunk_index,
+            message: 'NaN score encountered; substituting zero'
+          },
+          null,
+          2
+        )
+      );
+      score = 0;
+    }
     return {
       score,
       filename: row.filename,
@@ -152,17 +216,69 @@ export async function retrieveContext(db, client, query) {
   });
 
   const top = scored.sort((a, b) => b.score - a.score).slice(0, CONFIG.retrieval.topK);
-  const maxScore = top.length ? top[0].score : null;
-  const filtered = top.filter((item) => item.score >= CONFIG.retrieval.minScore);
+  console.log(
+    JSON.stringify(
+      {
+        event: 'similarity_top_scores',
+        requestId,
+        scores: top.map((item) => ({
+          filename: item.filename,
+          chunkIndex: item.chunkIndex,
+          score: item.score
+        }))
+      },
+      null,
+      2
+    )
+  );
 
-  const contextChunks = filtered.map((item) => ({
+  const maxScore = top.length ? top[0].score : null;
+  const minTopScore = top.length ? top[top.length - 1].score : null;
+  const minScore = Number.isFinite(CONFIG.retrieval.minScore) ? CONFIG.retrieval.minScore : 0;
+  const filtered = top.filter((item) => item.score >= minScore);
+  const chosen = filtered.length ? filtered : top;
+
+  console.log(
+    JSON.stringify(
+      {
+        event: 'similarity_search',
+        requestId,
+        totalEmbeddings: rows.length,
+        topK: CONFIG.retrieval.topK,
+        returnedTop: top.length,
+        filteredHits: filtered.length,
+        maxScore,
+        minTopScore,
+        threshold: minScore
+      },
+      null,
+      2
+    )
+  );
+
+  if (filtered.length === 0 && top.length > 0) {
+    console.warn(
+      JSON.stringify(
+        {
+          event: 'RAG_FILTER_DROPPED_ALL_RESULTS',
+          requestId,
+          threshold: minScore,
+          scores: top.map((item) => item.score)
+        },
+        null,
+        2
+      )
+    );
+  }
+
+  const contextChunks = chosen.map((item) => ({
     text: `Source: ${item.filename} [chunk ${item.chunkIndex}]\n${item.text}`,
     filename: item.filename,
     chunkIndex: item.chunkIndex,
     score: item.score
   }));
 
-  return { contextChunks, sources: filtered, maxScore };
+  return { contextChunks, sources: chosen, maxScore };
 }
 
 export function validateLMStudioEndpoint() {

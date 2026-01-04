@@ -49,10 +49,15 @@ const PROMPT_TOKEN_BUDGET = 30000;
 const MAX_COMPLETION_ATTEMPTS = 2;
 const MIN_RETRY_TOKEN_BUFFER = 1024;
 const MAX_HISTORY_MESSAGES = 6;
+const DEFAULT_REQUEST_ID_PREFIX = 'chat';
 
 function estimateTokens(text) {
   if (!text) return 0;
   return Math.ceil(text.length / TOKEN_ESTIMATE_DIVISOR);
+}
+
+function createRequestId(prefix = DEFAULT_REQUEST_ID_PREFIX) {
+  return `${prefix}-${crypto.randomBytes(6).toString('hex')}`;
 }
 
 async function loadSystemPrompt() {
@@ -183,7 +188,7 @@ function analyzeCompletion(completion) {
   };
 }
 
-async function generateCompletionWithRecovery(messages, initialMaxTokens) {
+async function generateCompletionWithRecovery(messages, initialMaxTokens, requestId = 'chat-unknown') {
   let attempt = 0;
   let maxTokens = initialMaxTokens;
   let lastError = null;
@@ -196,6 +201,19 @@ async function generateCompletionWithRecovery(messages, initialMaxTokens) {
         max_tokens: maxTokens,
         stream: false
       });
+      console.log(
+        JSON.stringify(
+          {
+            event: 'lmstudio_completion_raw',
+            requestId,
+            attempt: attempt + 1,
+            model: CONFIG.lmStudio.chatModel,
+            response: completion
+          },
+          null,
+          2
+        )
+      );
       if (!completion?.choices?.length) {
         throw new Error('LM Studio returned no choices');
       }
@@ -220,7 +238,7 @@ async function generateCompletionWithRecovery(messages, initialMaxTokens) {
       Math.max(Math.floor(maxTokens * 2), maxTokens + MIN_RETRY_TOKEN_BUFFER)
     );
     console.warn(
-      `[LLM] Regenerating response (attempt ${attempt + 1}) with max_tokens=${maxTokens} after issue: ${lastError?.message}`
+      `[LLM] Regenerating response (requestId=${requestId}, attempt ${attempt + 1}) with max_tokens=${maxTokens} after issue: ${lastError?.message}`
     );
   }
 
@@ -312,6 +330,21 @@ app.post('/api/chat', async (req, res) => {
   if (!token || !message) {
     return res.status(400).json({ error: 'token and message are required' });
   }
+  const requestId = createRequestId();
+  console.log(
+    JSON.stringify(
+      {
+        event: 'chat_request',
+        requestId,
+        token,
+        messagePreview: message.slice(0, 200),
+        chatModel: CONFIG.lmStudio.chatModel,
+        embeddingModel: CONFIG.lmStudio.embeddingModel
+      },
+      null,
+      2
+    )
+  );
   upsertConversation(db, token);
   const userMessage = addMessage(db, token, 'user', message);
   const language = detectLanguage(message);
@@ -325,11 +358,18 @@ app.post('/api/chat', async (req, res) => {
       userAgent: req.get('user-agent'),
       ragSources: JSON.stringify([])
     });
+    console.log(
+      JSON.stringify(
+        { event: 'http_response', requestId, type: 'greeting', replyLength: greetingReply.length },
+        null,
+        2
+      )
+    );
     return res.json({ reply: greetingReply, sources: [] });
   }
 
   try {
-    const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message);
+    const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message, requestId);
     console.log(`[RAG] Retrieved ${contextChunks.length} chunks for query (max score: ${maxScore ?? 'n/a'})`);
 
     const historyMessages = getTrimmedHistory(token);
@@ -379,6 +419,19 @@ app.post('/api/chat', async (req, res) => {
         userAgent: req.get('user-agent'),
         ragSources: JSON.stringify([])
       });
+      console.log(
+        JSON.stringify(
+          {
+            event: 'http_response',
+            requestId,
+            type: 'no_context',
+            replyLength: noDataReply.length,
+            replyPreview: noDataReply.slice(0, 200)
+          },
+          null,
+          2
+        )
+      );
       return res.json({ reply: noDataReply, sources: [] });
     }
 
@@ -398,7 +451,13 @@ app.post('/api/chat', async (req, res) => {
     );
 
     const messages = buildMessages(finalContextText, historyMessages, language);
-    let { replyText } = await generateCompletionWithRecovery(messages, maxGenerationTokens);
+    const promptSummary = {
+      messageCount: messages.length,
+      totalChars: messages.reduce((sum, msg) => sum + (msg.content?.length || 0), 0),
+      messages: messages.map((msg) => ({ role: msg.role, length: msg.content?.length || 0 }))
+    };
+    console.log(JSON.stringify({ event: 'prompt_structure', requestId, ...promptSummary }, null, 2));
+    let { replyText } = await generateCompletionWithRecovery(messages, maxGenerationTokens, requestId);
     if (!replyText || replyText.trim().length === 0) {
       replyText = '⚠️ The system generated no response. Please retry.';
     }
@@ -408,9 +467,23 @@ app.post('/api/chat', async (req, res) => {
       userAgent: req.get('user-agent'),
       ragSources: JSON.stringify(finalSources)
     });
+    console.log(
+      JSON.stringify(
+        {
+          event: 'http_response',
+          requestId,
+          type: 'chat_success',
+          replyLength: replyText.length,
+          sourcesCount: finalSources.length,
+          replyPreview: replyText.slice(0, 200)
+        },
+        null,
+        2
+      )
+    );
     res.json({ reply: replyText, sources: finalSources });
   } catch (err) {
-    console.error('Chat error', err.message);
+    console.error('Chat error', err.message, { requestId });
     const fallbackReply = buildFallbackReply(language);
     const aiMessage = addMessage(db, token, 'assistant', fallbackReply);
     logInteraction(db, token, userMessage.id, aiMessage.id, {
@@ -418,6 +491,19 @@ app.post('/api/chat', async (req, res) => {
       userAgent: req.get('user-agent'),
       ragSources: JSON.stringify([])
     });
+    console.log(
+      JSON.stringify(
+        {
+          event: 'http_response',
+          requestId,
+          type: 'chat_fallback',
+          replyLength: fallbackReply.length,
+          replyPreview: fallbackReply.slice(0, 200)
+        },
+        null,
+        2
+      )
+    );
     res.status(200).json({ reply: fallbackReply, sources: [] });
   }
 });

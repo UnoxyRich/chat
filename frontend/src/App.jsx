@@ -203,7 +203,7 @@ export default function App() {
   const { token, messages, setMessages, loading, setLoading } = useConversation();
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
-  const [indexingStatus, setIndexingStatus] = useState({ state: 'idle', queue: [] });
+  const [indexingStatus, setIndexingStatus] = useState({ state: 'indexing' });
   const chatRef = useRef(null);
 
   useEffect(() => {
@@ -286,8 +286,9 @@ export default function App() {
     }
   };
 
-  const showIndexing = indexingStatus.state === 'indexing' || (indexingStatus.queue || []).length > 0;
-  const currentLabel = indexingStatus.currentFile === 'initial-scan' ? 'Preparing knowledge base' : indexingStatus.currentFile;
+  const showIndexing = indexingStatus.state === 'indexing';
+  const isError = indexingStatus.state === 'error';
+  const currentLabel = indexingStatus.currentFile;
 
   return (
     <div className="app-shell">
@@ -307,12 +308,19 @@ export default function App() {
                 <>
                   <span className="status-dot active" />
                   <div>
-                    <div className="status-title">Indexing new documents…</div>
+                    <div className="status-title">Indexing documents…</div>
                     <div className="status-caption">
-                      {currentLabel ? `Working on ${currentLabel}` : 'Queueing detected uploads'}
-                      {indexingStatus.queue && indexingStatus.queue.length > 0
-                        ? ` • Next: ${indexingStatus.queue.join(', ')}`
-                        : ''}
+                      {currentLabel ? `Building: ${currentLabel}` : 'Rebuilding knowledge base at startup'}
+                    </div>
+                  </div>
+                </>
+              ) : isError ? (
+                <>
+                  <span className="status-dot" />
+                  <div>
+                    <div className="status-title">Knowledge base unavailable</div>
+                    <div className="status-caption">
+                      {indexingStatus.error || 'No documents were successfully indexed. Add PDFs and restart.'}
                     </div>
                   </div>
                 </>
@@ -322,7 +330,7 @@ export default function App() {
                   <div>
                     <div className="status-title">Knowledge base ready</div>
                     <div className="status-caption">
-                      Watching for new PDFs in /files-for-uploading
+                      {`Indexed ${indexingStatus.processedFiles || 0} files (${indexingStatus.totalChunks || 0} chunks)`}
                     </div>
                   </div>
                 </>

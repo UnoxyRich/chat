@@ -8,7 +8,6 @@ import {
   replaceDocumentMetadata,
   storeEmbeddingChunk,
   getAllEmbeddings,
-  getDocumentByFilename,
   startIndexingJob,
   completeIndexingJob,
   failIndexingJob
@@ -46,10 +45,6 @@ export async function ingestDocument(db, client, filename) {
   const stat = fs.statSync(fullPath);
   const buffer = fs.readFileSync(fullPath);
   const hash = hashBuffer(buffer);
-  const existing = getDocumentByFilename(db, filename);
-  if (existing && existing.hash === hash && existing.mtime === stat.mtimeMs) {
-    return { filename, status: 'skipped' };
-  }
 
   const jobId = startIndexingJob(db, filename, stat.mtimeMs, hash);
   try {
@@ -68,24 +63,28 @@ export async function ingestDocument(db, client, filename) {
   }
 }
 
-export async function ingestDocuments(db, client) {
+export async function ingestDocuments(db, client, { onFileStart } = {}) {
   const files = fs.readdirSync(CONFIG.filesDir).filter((file) => file.toLowerCase().endsWith('.pdf'));
   const results = [];
-  let hasError = false;
+  let totalChunks = 0;
+  let processedFiles = 0;
   for (const file of files) {
+    if (onFileStart) {
+      onFileStart(file);
+    }
     try {
       const result = await ingestDocument(db, client, file);
       results.push(result);
+      if (result.status === 'indexed') {
+        processedFiles += 1;
+        totalChunks += result.chunks || 0;
+      }
     } catch (err) {
       results.push({ filename: file, status: 'error', error: err.message });
-      hasError = true;
     }
   }
-  if (hasError) {
-    const failed = results.filter((r) => r.status === 'error').map((r) => r.filename).join(', ');
-    throw new Error(`Failed to ingest: ${failed}`);
-  }
-  return results;
+  const errors = results.filter((r) => r.status === 'error').length;
+  return { results, totalFiles: files.length, processedFiles, totalChunks, errors };
 }
 
 function cosineSimilarity(a, b) {

@@ -205,18 +205,14 @@ export default function App() {
   const [error, setError] = useState('');
   const [indexingStatus, setIndexingStatus] = useState({ state: 'indexing' });
   const chatRef = useRef(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const hasMessage = input.trim().length > 0;
 
   useEffect(() => {
-    if (!chatRef.current) return;
+    if (!chatRef.current || !autoScroll) return;
     const el = chatRef.current;
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-  }, [messages]);
-
-  useEffect(() => {
-    if (!chatRef.current || !loading) return;
-    const el = chatRef.current;
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-  }, [loading]);
+  }, [messages, loading, autoScroll]);
 
   useEffect(() => {
     let cancelled = false;
@@ -286,6 +282,13 @@ export default function App() {
     }
   };
 
+  const handleScroll = () => {
+    if (!chatRef.current) return;
+    const el = chatRef.current;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setAutoScroll(distanceFromBottom < 80);
+  };
+
   const showIndexing = indexingStatus.state === 'indexing';
   const isError = indexingStatus.state === 'error';
   const currentLabel = indexingStatus.currentFile;
@@ -336,7 +339,7 @@ export default function App() {
                 </>
               )}
             </div>
-            <div className="chat-window" ref={chatRef} aria-live="polite">
+            <div className="chat-window" ref={chatRef} aria-live="polite" onScroll={handleScroll}>
               {messages.length === 0 && !loading ? (
                 <StarterPrompts onSelect={handleStarter} />
               ) : (
@@ -368,6 +371,21 @@ export default function App() {
                   disabled={!token || loading}
                   rows={2}
                 />
+                <button
+                  type="submit"
+                  className={`send-button ${hasMessage && !loading ? 'active' : ''}`}
+                  aria-label="Send message"
+                  disabled={!token || loading || !hasMessage}
+                >
+                  <span className="send-icon" aria-hidden="true">
+                    <svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg" role="presentation">
+                      <path
+                        d="M3.5 9.5 15.8 4.2c.5-.2 1 .3.8.8L11 17.5c-.2.5-.9.5-1.1 0l-2-5-5-2c-.5-.2-.5-.9 0-1z"
+                        fill="#000"
+                      />
+                    </svg>
+                  </span>
+                </button>
               </div>
             </form>
           </div>

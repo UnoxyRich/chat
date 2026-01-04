@@ -12,7 +12,8 @@ import {
   listMessages,
   logInteraction,
   listConversations,
-  getRecentIndexingJobs
+  getRecentIndexingJobs,
+  getAllEmbeddings
 } from './db.js';
 import chokidar from 'chokidar';
 import {
@@ -43,6 +44,11 @@ const indexingState = {
 };
 
 const TOKEN_ESTIMATE_DIVISOR = 4;
+const CONTEXT_TOKEN_BUDGET = 20000;
+const PROMPT_TOKEN_BUDGET = 30000;
+const MAX_COMPLETION_ATTEMPTS = 2;
+const MIN_RETRY_TOKEN_BUFFER = 1024;
+const MAX_HISTORY_MESSAGES = 6;
 
 function estimateTokens(text) {
   if (!text) return 0;
@@ -51,35 +57,6 @@ function estimateTokens(text) {
 
 async function loadSystemPrompt() {
   systemPrompt = fs.readFileSync(CONFIG.systemPromptPath, 'utf-8');
-}
-
-function resolveEmbeddingModel(modelIds) {
-  const configuredEmbedding = CONFIG.lmStudio.embeddingModel;
-  const preferredEmbedding =
-    configuredEmbedding === 'text-embedding-3-large'
-      ? 'text-embedding-mxbai-embed-large-v1'
-      : configuredEmbedding;
-  const fallbackEmbedding = 'text-embedding-nomic-embed-text-v1.5';
-
-  const remapped = configuredEmbedding === 'text-embedding-3-large';
-  if (remapped) {
-    console.warn(
-      `[LM Studio] Embedding model ${configuredEmbedding} is deprecated; attempting ${preferredEmbedding} instead.`
-    );
-  }
-
-  if (modelIds.includes(preferredEmbedding)) {
-    return { embeddingModel: preferredEmbedding, fallbackUsed: false, remapped };
-  }
-
-  if (preferredEmbedding === 'text-embedding-mxbai-embed-large-v1' && modelIds.includes(fallbackEmbedding)) {
-    console.warn(
-      `[LM Studio] Embedding model ${preferredEmbedding} not available; falling back to ${fallbackEmbedding}.`
-    );
-    return { embeddingModel: fallbackEmbedding, fallbackUsed: true, remapped };
-  }
-
-  throw new Error(`Embedding model ${preferredEmbedding} not available in LM Studio`);
 }
 
 async function verifyLMStudio(client) {
@@ -92,20 +69,27 @@ async function verifyLMStudio(client) {
     throw new Error(`LM Studio is not reachable at ${CONFIG.lmStudio.baseURL}: ${err.message}`);
   }
 
+  console.log('[LM Studio] Available models:', modelIds.join(', '));
+
   if (!modelIds.includes(CONFIG.lmStudio.chatModel)) {
     throw new Error(`Chat model ${CONFIG.lmStudio.chatModel} not available in LM Studio`);
   }
 
-  const { embeddingModel, fallbackUsed, remapped } = resolveEmbeddingModel(modelIds);
-  CONFIG.lmStudio.embeddingModel = embeddingModel;
-  return { embeddingModel, fallbackUsed, remapped };
+  if (!modelIds.includes(CONFIG.lmStudio.embeddingModel)) {
+    throw new Error(
+      `Embedding model '${CONFIG.lmStudio.embeddingModel}' not found in LM Studio. Available models: [${modelIds.join(', ')}]`
+    );
+  }
+
+  console.log(`[LM Studio] Embedding model ready: ${CONFIG.lmStudio.embeddingModel}`);
+  return { embeddingModel: CONFIG.lmStudio.embeddingModel };
 }
 
 async function startup() {
   await loadSystemPrompt();
   validateLMStudioEndpoint();
   openaiClient = createOpenAIClient();
-  const { embeddingModel, fallbackUsed, remapped } = await verifyLMStudio(openaiClient);
+  const { embeddingModel } = await verifyLMStudio(openaiClient);
   await warmUpModels(openaiClient);
   indexingState.state = 'indexing';
   indexingState.currentFile = 'initial-scan';
@@ -116,17 +100,16 @@ async function startup() {
       `No PDFs found in ${CONFIG.filesDir}. Place the knowledge base PDFs there so embeddings can be generated.`
     );
   }
+  const embeddedChunks = getAllEmbeddings(db).length;
+  if (embeddedChunks === 0) {
+    throw new Error('No PDF chunks were embedded. Confirm the PDFs contain text and retry ingestion.');
+  }
   indexingState.lastResult = { filename: 'initial-scan', status: 'completed', results, completedAt: Date.now() };
   indexingState.state = 'idle';
   indexingState.currentFile = null;
   console.log('[LLM] Chat model pinned:', CONFIG.lmStudio.chatModel);
   console.log('[LLM] Embedding model pinned:', embeddingModel);
-  if (remapped) {
-    console.log('[LLM] Embedding model remapped from text-embedding-3-large to preferred option.');
-  }
-  if (fallbackUsed) {
-    console.log('[LLM] Embedding model fallback in use; update LM Studio to restore preferred model.');
-  }
+  console.log(`[RAG] Embedded chunks confirmed: ${embeddedChunks}`);
   console.log('[RAG] Embedding engine ready');
 }
 
@@ -155,13 +138,23 @@ function detectLanguage(text) {
   return 'en';
 }
 
-function buildMessages(context, userInput, language) {
+function getInstructionTexts(language) {
   const safetyInstruction =
     'Use only the provided RAG context to answer. If the context is missing or insufficient, say you cannot find the information and ask for a specific product name or documentation. Never invent details.';
   const languageInstruction =
     language === 'zh'
       ? '请使用用户提问的语言进行回答，若缺少上下文，请礼貌告知无法找到相关信息，不要猜测。'
-      : 'Respond in the user\'s language. If you lack sufficient context, politely state that and do not guess.';
+      : "Respond in the user's language. If you lack sufficient context, politely state that and do not guess.";
+  return { safetyInstruction, languageInstruction };
+}
+
+function getTrimmedHistory(conversationId) {
+  const history = listMessages(db, conversationId);
+  return history.slice(-MAX_HISTORY_MESSAGES).map(({ role, content }) => ({ role, content }));
+}
+
+function buildMessages(context, history, language) {
+  const { safetyInstruction, languageInstruction } = getInstructionTexts(language);
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'system', content: safetyInstruction },
@@ -170,8 +163,74 @@ function buildMessages(context, userInput, language) {
   if (context) {
     messages.push({ role: 'system', content: `RAG context:\n${context}` });
   }
-  messages.push({ role: 'user', content: userInput });
+  history.forEach((msg) => {
+    messages.push({ role: msg.role, content: msg.content });
+  });
   return messages;
+}
+
+function analyzeCompletion(completion) {
+  const choice = completion?.choices?.[0];
+  const finishReason = choice?.finish_reason || choice?.finishReason;
+  const content = choice?.message?.content ? choice.message.content.trim() : '';
+  const hasContent = Boolean(content);
+  const invalidFinishReason = finishReason && finishReason !== 'stop';
+  const missingFinishReason = !finishReason;
+  return {
+    content,
+    finishReason,
+    invalid: !hasContent || invalidFinishReason || missingFinishReason
+  };
+}
+
+async function generateCompletionWithRecovery(messages, initialMaxTokens) {
+  let attempt = 0;
+  let maxTokens = initialMaxTokens;
+  let lastError = null;
+
+  while (attempt < MAX_COMPLETION_ATTEMPTS) {
+    try {
+      const completion = await openaiClient.chat.completions.create({
+        model: CONFIG.lmStudio.chatModel,
+        messages,
+        max_tokens: maxTokens,
+        stream: false
+      });
+      if (!completion?.choices?.length) {
+        throw new Error('LM Studio returned no choices');
+      }
+      const { content, finishReason, invalid } = analyzeCompletion(completion);
+      if (!invalid) {
+        return { replyText: content, finishReason };
+      }
+      lastError = new Error(
+        `LLM returned an invalid response (finish_reason=${finishReason || 'none'}, length=${content.length})`
+      );
+    } catch (err) {
+      lastError = err;
+    }
+
+    attempt += 1;
+    if (attempt >= MAX_COMPLETION_ATTEMPTS) {
+      break;
+    }
+
+    maxTokens = Math.min(
+      CONFIG.outputTokenCap,
+      Math.max(Math.floor(maxTokens * 2), maxTokens + MIN_RETRY_TOKEN_BUFFER)
+    );
+    console.warn(
+      `[LLM] Regenerating response (attempt ${attempt + 1}) with max_tokens=${maxTokens} after issue: ${lastError?.message}`
+    );
+  }
+
+  throw lastError || new Error('LLM response was empty or invalid after retries');
+}
+
+function buildFallbackReply(language) {
+  return language === 'zh'
+    ? '我暂时无法生成完整的回答。请告诉我具体的产品名称、型号或提供相关PDF，我会立即再次查找。'
+    : 'I ran into an issue generating a complete answer. Please share the exact product name, model, or upload the related PDF so I can try again right away.';
 }
 
 function generateToken() {
@@ -273,16 +332,19 @@ app.post('/api/chat', async (req, res) => {
     const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message);
     console.log(`[RAG] Retrieved ${contextChunks.length} chunks for query (max score: ${maxScore ?? 'n/a'})`);
 
-    const systemTokens = estimateTokens(systemPrompt) + estimateTokens(greetingReply) + 50;
-    const userTokens = estimateTokens(message);
+    const historyMessages = getTrimmedHistory(token);
+    const { safetyInstruction, languageInstruction } = getInstructionTexts(language);
+    const systemTokens =
+      estimateTokens(systemPrompt) +
+      estimateTokens(safetyInstruction) +
+      estimateTokens(languageInstruction) +
+      50;
+    const conversationTokens = historyMessages.reduce((sum, msg) => sum + estimateTokens(msg.content), 0);
     let selectedContext = contextChunks.map((chunk) => ({ ...chunk, tokens: estimateTokens(chunk.text) }));
-
-    const CONTEXT_TOKEN_BUDGET = 2000;
-    const PROMPT_TOKEN_BUDGET = 3000;
 
     const computeReserved = (contextMsgs) => {
       const contextTokens = contextMsgs.reduce((sum, chunk) => sum + chunk.tokens, 0);
-      return systemTokens + userTokens + contextTokens;
+      return systemTokens + conversationTokens + contextTokens;
     };
 
     let reservedTokens = computeReserved(selectedContext);
@@ -297,11 +359,11 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const remainingForGeneration = PROMPT_TOKEN_BUDGET - reservedTokens;
-    const maxGenerationTokens = Math.min(CONFIG.outputTokenCap, remainingForGeneration);
-
-    if (maxGenerationTokens <= 0) {
-      throw new Error('No tokens available for generation after budgeting.');
+    if (remainingForGeneration < CONFIG.minCompletionTokens) {
+      throw new Error('Insufficient tokens available for generation (requires at least 1024 tokens).');
     }
+
+    const maxGenerationTokens = Math.min(CONFIG.outputTokenCap, remainingForGeneration);
 
     const finalContextText = selectedContext.map((chunk) => chunk.text).join('\n\n');
     const finalSources = sources.slice(0, selectedContext.length);
@@ -309,8 +371,8 @@ app.post('/api/chat', async (req, res) => {
     if (selectedContext.length === 0) {
       const noDataReply =
         language === 'zh'
-          ? '没有找到相关的文档内容。请提供具体的产品名称或上传对应的PDF以便我查阅。'
-          : 'I could not find relevant information in the indexed documents. Please provide the exact product name or upload the related PDF.';
+          ? '没有找到相关的文档内容。请告诉我具体的产品名称或型号，或上传对应的PDF文件，我可以立即为你查阅。你希望我查看哪款产品？'
+          : 'I could not find relevant information in the indexed documents. Which exact product or document should I check? Please share the product name/model or upload the related PDF so I can help right away.';
       const aiMessage = addMessage(db, token, 'assistant', noDataReply);
       logInteraction(db, token, userMessage.id, aiMessage.id, {
         ip: req.ip,
@@ -327,7 +389,7 @@ app.post('/api/chat', async (req, res) => {
           reservedTokens,
           maxGenerationTokens,
           systemTokens,
-          userTokens,
+          conversationTokens,
           contextTokens: selectedContext.reduce((sum, chunk) => sum + chunk.tokens, 0)
         },
         null,
@@ -335,13 +397,11 @@ app.post('/api/chat', async (req, res) => {
       )
     );
 
-    const messages = buildMessages(finalContextText, message, language);
-    const completion = await openaiClient.chat.completions.create({
-      model: CONFIG.lmStudio.chatModel,
-      messages,
-      max_tokens: maxGenerationTokens
-    });
-    const replyText = completion.choices[0].message.content;
+    const messages = buildMessages(finalContextText, historyMessages, language);
+    let { replyText } = await generateCompletionWithRecovery(messages, maxGenerationTokens);
+    if (!replyText || replyText.trim().length === 0) {
+      replyText = '⚠️ The system generated no response. Please retry.';
+    }
     const aiMessage = addMessage(db, token, 'assistant', replyText);
     logInteraction(db, token, userMessage.id, aiMessage.id, {
       ip: req.ip,
@@ -351,7 +411,14 @@ app.post('/api/chat', async (req, res) => {
     res.json({ reply: replyText, sources: finalSources });
   } catch (err) {
     console.error('Chat error', err.message);
-    res.status(500).json({ error: 'Chat failed', details: err.message });
+    const fallbackReply = buildFallbackReply(language);
+    const aiMessage = addMessage(db, token, 'assistant', fallbackReply);
+    logInteraction(db, token, userMessage.id, aiMessage.id, {
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      ragSources: JSON.stringify([])
+    });
+    res.status(200).json({ reply: fallbackReply, sources: [] });
   }
 });
 

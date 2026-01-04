@@ -8,7 +8,10 @@ import {
   replaceDocumentMetadata,
   storeEmbeddingChunk,
   getAllEmbeddings,
-  getDocumentByFilename
+  getDocumentByFilename,
+  startIndexingJob,
+  completeIndexingJob,
+  failIndexingJob
 } from '../backend/db.js';
 
 function hashBuffer(buffer) {
@@ -35,25 +38,54 @@ async function embedBatch(client, texts) {
   return response.data.map((item) => item.embedding);
 }
 
-export async function ingestDocuments(db, client) {
-  const files = fs.readdirSync(CONFIG.filesDir).filter((file) => file.toLowerCase().endsWith('.pdf'));
-  for (const file of files) {
-    const fullPath = path.join(CONFIG.filesDir, file);
-    const stat = fs.statSync(fullPath);
-    const buffer = fs.readFileSync(fullPath);
-    const hash = hashBuffer(buffer);
-    const existing = getDocumentByFilename(db, file);
-    if (existing && existing.hash === hash && existing.mtime === stat.mtimeMs) {
-      continue;
-    }
+export async function ingestDocument(db, client, filename) {
+  const fullPath = path.join(CONFIG.filesDir, filename);
+  if (!fs.existsSync(fullPath)) {
+    throw new Error(`File ${filename} no longer exists`);
+  }
+  const stat = fs.statSync(fullPath);
+  const buffer = fs.readFileSync(fullPath);
+  const hash = hashBuffer(buffer);
+  const existing = getDocumentByFilename(db, filename);
+  if (existing && existing.hash === hash && existing.mtime === stat.mtimeMs) {
+    return { filename, status: 'skipped' };
+  }
+
+  const jobId = startIndexingJob(db, filename, stat.mtimeMs, hash);
+  try {
     const data = await pdf(buffer);
     const chunks = splitText(data.text, CONFIG.retrieval.chunkSize, CONFIG.retrieval.chunkOverlap);
     const embeddings = await embedBatch(client, chunks);
-    const docId = replaceDocumentMetadata(db, file, stat.mtimeMs, hash);
+    const docId = replaceDocumentMetadata(db, filename, stat.mtimeMs, hash);
     embeddings.forEach((embedding, idx) => {
       storeEmbeddingChunk(db, docId, idx, embedding, chunks[idx]);
     });
+    completeIndexingJob(db, jobId);
+    return { filename, status: 'indexed', chunks: chunks.length };
+  } catch (err) {
+    failIndexingJob(db, jobId, err.message);
+    throw err;
   }
+}
+
+export async function ingestDocuments(db, client) {
+  const files = fs.readdirSync(CONFIG.filesDir).filter((file) => file.toLowerCase().endsWith('.pdf'));
+  const results = [];
+  let hasError = false;
+  for (const file of files) {
+    try {
+      const result = await ingestDocument(db, client, file);
+      results.push(result);
+    } catch (err) {
+      results.push({ filename: file, status: 'error', error: err.message });
+      hasError = true;
+    }
+  }
+  if (hasError) {
+    const failed = results.filter((r) => r.status === 'error').map((r) => r.filename).join(', ');
+    throw new Error(`Failed to ingest: ${failed}`);
+  }
+  return results;
 }
 
 function cosineSimilarity(a, b) {
@@ -69,8 +101,12 @@ function cosineSimilarity(a, b) {
 }
 
 export async function retrieveContext(db, client, query) {
-  const queryEmbedding = (await embedBatch(client, [query]))[0];
   const rows = getAllEmbeddings(db);
+  if (!rows.length) {
+    return { contextChunks: [], sources: [], maxScore: null };
+  }
+
+  const queryEmbedding = (await embedBatch(client, [query]))[0];
   const scored = rows.map((row) => {
     const vector = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
     const score = cosineSimilarity(queryEmbedding, Array.from(vector));
@@ -81,14 +117,19 @@ export async function retrieveContext(db, client, query) {
       text: row.text
     };
   });
+
   const top = scored.sort((a, b) => b.score - a.score).slice(0, CONFIG.retrieval.topK);
-  const contextChunks = top.map((item) => ({
+  const maxScore = top.length ? top[0].score : null;
+  const filtered = top.filter((item) => item.score >= CONFIG.retrieval.minScore);
+
+  const contextChunks = filtered.map((item) => ({
     text: `Source: ${item.filename} [chunk ${item.chunkIndex}]\n${item.text}`,
     filename: item.filename,
     chunkIndex: item.chunkIndex,
     score: item.score
   }));
-  return { contextChunks, sources: top };
+
+  return { contextChunks, sources: filtered, maxScore };
 }
 
 export function createOpenAIClient() {

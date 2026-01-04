@@ -19,12 +19,13 @@ export const CONFIG = {
   retrieval: {
     chunkSize: 800,
     chunkOverlap: 100,
-    topK: 5
+    topK: 5,
+    minScore: parseFloat(process.env.RETRIEVAL_MIN_SCORE || '0.25')
   }
 };
 
 export function ensureDirectories() {
-  [path.dirname(CONFIG.dbFile), CONFIG.logDir].forEach((dir) => {
+  [path.dirname(CONFIG.dbFile), CONFIG.logDir, CONFIG.filesDir].forEach((dir) => {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }

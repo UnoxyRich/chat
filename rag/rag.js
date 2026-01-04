@@ -216,7 +216,7 @@ export async function warmUpModels(client) {
         await client.chat.completions.create({
           model: CONFIG.lmStudio.chatModel,
           messages: [{ role: 'system', content: 'warmup' }, { role: 'user', content: 'warmup' }],
-          max_tokens: 16
+          max_tokens: 160
         });
         console.log(`${warmupLabel} chat complete`);
       } catch (err) {

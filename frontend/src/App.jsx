@@ -447,14 +447,18 @@ export default function App() {
         } else {
           buffer = '';
         }
-        parts.filter(Boolean).forEach((line) => {
-          try {
-            const payload = JSON.parse(line);
-            handlePayload(payload);
-          } catch (err) {
-            console.error('Failed to parse stream chunk', line, err);
-          }
-        });
+        parts
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .forEach((line) => {
+            const normalized = line.startsWith('data:') ? line.slice(5).trim() : line;
+            try {
+              const payload = JSON.parse(normalized);
+              handlePayload(payload);
+            } catch (err) {
+              console.error('Failed to parse stream chunk', normalized, err);
+            }
+          });
       };
 
       // Stream tokens as they arrive

@@ -51,6 +51,7 @@ const MIN_RETRY_TOKEN_BUFFER = 1024;
 const MAX_HISTORY_MESSAGES = 6;
 const DEFAULT_REQUEST_ID_PREFIX = 'chat';
 const STREAM_EVENT_CONTENT_TYPE = 'text/event-stream';
+const STREAM_EVENT_PREFIX = 'data: ';
 
 function estimateTokens(text) {
   if (!text) return 0;
@@ -69,7 +70,7 @@ function setEventStreamHeaders(res) {
 }
 
 function writeStreamEvent(res, payload) {
-  res.write(`${JSON.stringify(payload)}\n`);
+  res.write(`${STREAM_EVENT_PREFIX}${JSON.stringify(payload)}\n\n`);
 }
 
 async function loadSystemPrompt() {

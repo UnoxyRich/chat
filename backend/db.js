@@ -81,6 +81,7 @@ export function addMessage(db, conversationId, role, content) {
   const result = db
     .prepare('INSERT INTO messages(conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)')
     .run(conversationId, role, content, now);
+  db.prepare('UPDATE conversations SET last_active_at = ? WHERE id = ?').run(now, conversationId);
   return { id: result.lastInsertRowid, created_at: now };
 }
 
@@ -165,6 +166,40 @@ export function getRecentIndexingJobs(db, limit = 10) {
   return db
     .prepare(
       'SELECT id, filename, status, started_at, completed_at, error, mtime, hash FROM indexing_jobs ORDER BY started_at DESC LIMIT ?'
+    )
+    .all(limit);
+}
+
+export function listConversations(db, limit = 50) {
+  return db
+    .prepare(
+      `
+      SELECT
+        c.id,
+        c.created_at,
+        c.last_active_at,
+        (
+          SELECT content FROM messages
+          WHERE conversation_id = c.id AND role = 'user'
+          ORDER BY id ASC
+          LIMIT 1
+        ) AS first_user_message,
+        (
+          SELECT content FROM messages
+          WHERE conversation_id = c.id
+          ORDER BY id DESC
+          LIMIT 1
+        ) AS last_message,
+        (
+          SELECT created_at FROM messages
+          WHERE conversation_id = c.id
+          ORDER BY id DESC
+          LIMIT 1
+        ) AS last_message_at
+      FROM conversations c
+      ORDER BY c.last_active_at DESC
+      LIMIT ?
+    `
     )
     .all(limit);
 }

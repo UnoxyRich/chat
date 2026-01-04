@@ -11,6 +11,7 @@ import {
   addMessage,
   listMessages,
   logInteraction,
+  listConversations,
   getRecentIndexingJobs
 } from './db.js';
 import chokidar from 'chokidar';
@@ -211,8 +212,14 @@ app.get('/api/indexing/status', (req, res) => {
 
 app.get('/api/conversation/:token', (req, res) => {
   const { token } = req.params;
+  upsertConversation(db, token);
   const messages = listMessages(db, token);
   res.json({ messages });
+});
+
+app.get('/api/conversations', (req, res) => {
+  const conversations = listConversations(db, 100);
+  res.json({ conversations });
 });
 
 app.post('/api/chat', async (req, res) => {

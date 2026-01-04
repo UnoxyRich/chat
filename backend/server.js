@@ -43,34 +43,14 @@ const indexingState = {
   lastResult: null
 };
 
-const TOKEN_ESTIMATE_DIVISOR = 4;
-const CONTEXT_TOKEN_BUDGET = 20000;
-const PROMPT_TOKEN_BUDGET = 30000;
 const MAX_COMPLETION_ATTEMPTS = 2;
-const MIN_RETRY_TOKEN_BUFFER = 1024;
 const MAX_HISTORY_MESSAGES = 6;
 const DEFAULT_REQUEST_ID_PREFIX = 'chat';
-const STREAM_EVENT_CONTENT_TYPE = 'text/event-stream';
-const STREAM_EVENT_PREFIX = 'data: ';
-
-function estimateTokens(text) {
-  if (!text) return 0;
-  return Math.ceil(text.length / TOKEN_ESTIMATE_DIVISOR);
-}
+const RAG_CONTEXT_CHAR_LIMIT = 4000;
+const MIN_RETRY_TOKEN_BUFFER = 512;
 
 function createRequestId(prefix = DEFAULT_REQUEST_ID_PREFIX) {
   return `${prefix}-${crypto.randomBytes(6).toString('hex')}`;
-}
-
-function setEventStreamHeaders(res) {
-  res.setHeader('Content-Type', STREAM_EVENT_CONTENT_TYPE);
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders();
-}
-
-function writeStreamEvent(res, payload) {
-  res.write(`${STREAM_EVENT_PREFIX}${JSON.stringify(payload)}\n\n`);
 }
 
 async function loadSystemPrompt() {
@@ -171,13 +151,16 @@ function getTrimmedHistory(conversationId) {
   return history.slice(-MAX_HISTORY_MESSAGES).map(({ role, content }) => ({ role, content }));
 }
 
-function buildMessages(context, history, language) {
+function buildMessages(context, history, language, ragNote) {
   const { safetyInstruction, languageInstruction } = getInstructionTexts(language);
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'system', content: safetyInstruction },
     { role: 'system', content: languageInstruction }
   ];
+  if (ragNote) {
+    messages.push({ role: 'system', content: ragNote });
+  }
   if (context) {
     messages.push({ role: 'system', content: `RAG context:\n${context}` });
   }
@@ -199,125 +182,6 @@ function analyzeCompletion(completion) {
     finishReason,
     invalid: !hasContent || invalidFinishReason || missingFinishReason
   };
-}
-
-async function streamCompletionWithRecovery(messages, initialMaxTokens, requestId, onToken) {
-  let attempt = 0;
-  let maxTokens = initialMaxTokens;
-  let lastError = null;
-
-  while (attempt < MAX_COMPLETION_ATTEMPTS) {
-    let collected = '';
-    let tokenCount = 0;
-    let firstTokenLatencyMs = null;
-    const start = Date.now();
-
-    try {
-      console.log(
-        JSON.stringify(
-          { event: 'stream_start', requestId, attempt: attempt + 1, maxTokens, model: CONFIG.lmStudio.chatModel },
-          null,
-          2
-        )
-      );
-      const stream = await openaiClient.chat.completions.create({
-        model: CONFIG.lmStudio.chatModel,
-        messages,
-        max_tokens: maxTokens,
-        stream: true
-      });
-
-      let lastFinishReason = null;
-      for await (const part of stream) {
-        const delta = part?.choices?.[0]?.delta?.content;
-        const finishReason = part?.choices?.[0]?.finish_reason || part?.choices?.[0]?.finishReason;
-        if (delta) {
-          collected += delta;
-          tokenCount += 1;
-          if (firstTokenLatencyMs === null) {
-            firstTokenLatencyMs = Date.now() - start;
-            console.log(
-              JSON.stringify(
-                { event: 'stream_first_token', requestId, attempt: attempt + 1, latencyMs: firstTokenLatencyMs },
-                null,
-                2
-              )
-            );
-          }
-          onToken(delta);
-        }
-        if (finishReason) {
-          lastFinishReason = finishReason;
-        }
-      }
-
-      console.log(
-        JSON.stringify(
-          {
-            event: 'stream_end',
-            requestId,
-            attempt: attempt + 1,
-            tokenCount,
-            durationMs: Date.now() - start,
-            firstTokenLatencyMs,
-            finishReason: lastFinishReason || 'unknown'
-          },
-          null,
-          2
-        )
-      );
-
-      if (collected.length > 0) {
-        return {
-          replyText: collected,
-          finishReason: lastFinishReason || 'streamed',
-          tokenCount,
-          firstTokenLatencyMs,
-          interrupted: false
-        };
-      }
-
-      lastError = new Error('Stream returned no tokens');
-    } catch (err) {
-      if (collected.length > 0) {
-        console.warn(
-          JSON.stringify(
-            {
-              event: 'stream_error_after_tokens',
-              requestId,
-              attempt: attempt + 1,
-              tokenCount,
-              message: err.message
-            },
-            null,
-            2
-          )
-        );
-        return {
-          replyText: collected,
-          finishReason: 'error',
-          tokenCount,
-          firstTokenLatencyMs,
-          interrupted: true
-        };
-      }
-      lastError = err;
-    }
-
-    attempt += 1;
-    if (attempt >= MAX_COMPLETION_ATTEMPTS) {
-      break;
-    }
-
-    maxTokens = Math.min(CONFIG.outputTokenCap, Math.max(Math.floor(maxTokens * 2), maxTokens + MIN_RETRY_TOKEN_BUFFER));
-    console.warn(
-      `[LLM] Regenerating streamed response (requestId=${requestId}, attempt ${attempt + 1}) with max_tokens=${maxTokens} after issue: ${
-        lastError?.message
-      }`
-    );
-  }
-
-  throw lastError || new Error('LLM stream was empty or invalid after retries');
 }
 
 async function generateCompletionWithRecovery(messages, initialMaxTokens, requestId = 'chat-unknown') {
@@ -462,7 +326,6 @@ app.post('/api/chat', async (req, res) => {
   if (!token || !message) {
     return res.status(400).json({ error: 'token and message are required' });
   }
-  setEventStreamHeaders(res);
   const requestId = createRequestId();
   console.log(
     JSON.stringify(
@@ -484,17 +347,6 @@ app.post('/api/chat', async (req, res) => {
   const greetingReply =
     language === 'zh' ? '你好！很高兴和你交流，我可以怎样帮助你？' : 'Hello! How can I help you today?';
 
-  const streamState = { streamedText: '', sources: [], usedFallback: false };
-  const pushToken = (tokenText) => {
-    if (!tokenText) return;
-    streamState.streamedText += tokenText;
-    writeStreamEvent(res, { type: 'token', token: tokenText });
-  };
-  const endStream = (payload = {}) => {
-    writeStreamEvent(res, { type: 'done', ...payload });
-    res.end();
-  };
-
   if (isGreeting(message)) {
     const aiMessage = addMessage(db, token, 'assistant', greetingReply);
     logInteraction(db, token, userMessage.id, aiMessage.id, {
@@ -509,109 +361,62 @@ app.post('/api/chat', async (req, res) => {
         2
       )
     );
-    pushToken(greetingReply);
-    endStream({ sources: [], finishReason: 'greeting' });
-    return;
+    return res.json({ message: greetingReply, sources: [], finishReason: 'greeting', requestId });
   }
 
+  let contextChunks = [];
+  let sources = [];
+  let maxScore = null;
+  let ragNote = null;
+
   try {
-    const { contextChunks, sources, maxScore } = await retrieveContext(db, openaiClient, message, requestId, { language });
+    const retrievalResult = await retrieveContext(db, openaiClient, message, requestId, { language });
+    contextChunks = retrievalResult.contextChunks || [];
+    sources = retrievalResult.sources || [];
+    maxScore = retrievalResult.maxScore ?? null;
     console.log(`[RAG] Retrieved ${contextChunks.length} chunks for query (max score: ${maxScore ?? 'n/a'})`);
+  } catch (err) {
+    console.warn('RAG retrieval failed; continuing without context', err.message, { requestId });
+    ragNote =
+      language === 'zh'
+        ? '未找到相关文档上下文，将直接根据当前问题回答。'
+        : 'No relevant document context was found. Continuing with the model only.';
+  }
 
-    const historyMessages = getTrimmedHistory(token);
-    const { safetyInstruction, languageInstruction } = getInstructionTexts(language);
-    const systemTokens =
-      estimateTokens(systemPrompt) +
-      estimateTokens(safetyInstruction) +
-      estimateTokens(languageInstruction) +
-      50;
-    const conversationTokens = historyMessages.reduce((sum, msg) => sum + estimateTokens(msg.content), 0);
-    let selectedContext = contextChunks.map((chunk) => ({ ...chunk, tokens: estimateTokens(chunk.text) }));
+  if (!contextChunks.length) {
+    ragNote =
+      ragNote ||
+      (language === 'zh'
+        ? '未找到相关文档上下文，将直接根据当前问题回答。'
+        : 'No relevant document context was found. Continuing with the model only.');
+  }
 
-    const computeReserved = (contextMsgs) => {
-      const contextTokens = contextMsgs.reduce((sum, chunk) => sum + chunk.tokens, 0);
-      return systemTokens + conversationTokens + contextTokens;
-    };
+  const trimmedContext = contextChunks
+    .slice(0, CONFIG.retrieval.topK)
+    .map((chunk) => chunk.text)
+    .join('\n\n');
+  const contextText =
+    trimmedContext.length > RAG_CONTEXT_CHAR_LIMIT
+      ? `${trimmedContext.slice(0, RAG_CONTEXT_CHAR_LIMIT)}...`
+      : trimmedContext;
+  const finalSources = sources.slice(0, Math.max(contextChunks.length, 1));
 
-    let reservedTokens = computeReserved(selectedContext);
+  const historyMessages = getTrimmedHistory(token);
+  const messages = buildMessages(contextText, historyMessages, language, ragNote);
+  const promptSummary = {
+    messageCount: messages.length,
+    totalChars: messages.reduce((sum, msg) => sum + (msg.content?.length || 0), 0),
+    messages: messages.map((msg) => ({ role: msg.role, length: msg.content?.length || 0 }))
+  };
+  console.log(JSON.stringify({ event: 'prompt_structure', requestId, ...promptSummary }, null, 2));
 
-    while (reservedTokens > CONTEXT_TOKEN_BUDGET && selectedContext.length > 0) {
-      selectedContext.pop();
-      reservedTokens = computeReserved(selectedContext);
-    }
-
-    if (reservedTokens >= PROMPT_TOKEN_BUDGET) {
-      throw new Error('Insufficient context window for request even after trimming context.');
-    }
-
-    const remainingForGeneration = PROMPT_TOKEN_BUDGET - reservedTokens;
-    if (remainingForGeneration < CONFIG.minCompletionTokens) {
-      throw new Error('Insufficient tokens available for generation (requires at least 1024 tokens).');
-    }
-
-    const maxGenerationTokens = Math.min(CONFIG.outputTokenCap, remainingForGeneration);
-
-    const finalContextText = selectedContext.map((chunk) => chunk.text).join('\n\n');
-    const finalSources = sources.slice(0, selectedContext.length);
-
-    if (selectedContext.length === 0) {
-      const noDataReply =
-        language === 'zh'
-          ? '没有找到相关的文档内容。请告诉我具体的产品名称或型号，或上传对应的PDF文件，我可以立即为你查阅。你希望我查看哪款产品？'
-          : 'I could not find relevant information in the indexed documents. Which exact product or document should I check? Please share the product name/model or upload the related PDF so I can help right away.';
-      const aiMessage = addMessage(db, token, 'assistant', noDataReply);
-      logInteraction(db, token, userMessage.id, aiMessage.id, {
-        ip: req.ip,
-        userAgent: req.get('user-agent'),
-        ragSources: JSON.stringify([])
-      });
-      console.log(
-        JSON.stringify(
-          {
-            event: 'http_response',
-            requestId,
-            type: 'no_context',
-            replyLength: noDataReply.length,
-            replyPreview: noDataReply.slice(0, 200)
-          },
-          null,
-          2
-        )
-      );
-      pushToken(noDataReply);
-      endStream({ sources: [], finishReason: 'no_context' });
-      return;
-    }
-
-    console.log(
-      JSON.stringify(
-        {
-          event: 'token_budget',
-          reservedTokens,
-          maxGenerationTokens,
-          systemTokens,
-          conversationTokens,
-          contextTokens: selectedContext.reduce((sum, chunk) => sum + chunk.tokens, 0)
-        },
-        null,
-        2
-      )
-    );
-
-    const messages = buildMessages(finalContextText, historyMessages, language);
-    const promptSummary = {
-      messageCount: messages.length,
-      totalChars: messages.reduce((sum, msg) => sum + (msg.content?.length || 0), 0),
-      messages: messages.map((msg) => ({ role: msg.role, length: msg.content?.length || 0 }))
-    };
-    console.log(JSON.stringify({ event: 'prompt_structure', requestId, ...promptSummary }, null, 2));
-    const { replyText, interrupted, finishReason } = await streamCompletionWithRecovery(
+  try {
+    const { replyText, finishReason } = await generateCompletionWithRecovery(
       messages,
-      maxGenerationTokens,
-      requestId,
-      pushToken
+      CONFIG.outputTokenCap,
+      requestId
     );
-    const finalReply = replyText && replyText.trim().length > 0 ? replyText : streamState.streamedText;
+    const finalReply = replyText && replyText.trim().length > 0 ? replyText.trim() : buildFallbackReply(language);
     const aiMessage = addMessage(db, token, 'assistant', finalReply);
     logInteraction(db, token, userMessage.id, aiMessage.id, {
       ip: req.ip,
@@ -627,46 +432,23 @@ app.post('/api/chat', async (req, res) => {
           replyLength: finalReply.length,
           sourcesCount: finalSources.length,
           replyPreview: finalReply.slice(0, 200),
-          stream: {
-            tokenCount: streamState.streamedText.length,
-            finishReason: finishReason || 'streamed',
-            interrupted: Boolean(interrupted)
-          }
+          finishReason: finishReason || 'stop'
         },
         null,
         2
       )
     );
-    endStream({ sources: finalSources, finishReason: finishReason || 'streamed', interrupted: Boolean(interrupted) });
+    res.json({ message: finalReply, sources: finalSources, finishReason: finishReason || 'stop', requestId, note: ragNote });
   } catch (err) {
     console.error('Chat error', err.message, { requestId });
-    let fallbackReply = streamState.streamedText;
-    if (!fallbackReply) {
-      fallbackReply = buildFallbackReply(language);
-      streamState.usedFallback = true;
-      pushToken(fallbackReply);
-    }
+    const fallbackReply = buildFallbackReply(language);
     const aiMessage = addMessage(db, token, 'assistant', fallbackReply);
     logInteraction(db, token, userMessage.id, aiMessage.id, {
       ip: req.ip,
       userAgent: req.get('user-agent'),
-      ragSources: JSON.stringify([])
+      ragSources: JSON.stringify(finalSources)
     });
-    console.log(
-      JSON.stringify(
-        {
-          event: 'http_response',
-          requestId,
-          type: 'chat_fallback',
-          replyLength: fallbackReply.length,
-          replyPreview: fallbackReply.slice(0, 200),
-          streamFallbackUsed: streamState.usedFallback
-        },
-        null,
-        2
-      )
-    );
-    endStream({ sources: [], finishReason: 'fallback', streamFallbackUsed: streamState.usedFallback });
+    res.json({ message: fallbackReply, sources: finalSources, finishReason: 'fallback', requestId, note: ragNote });
   }
 });
 

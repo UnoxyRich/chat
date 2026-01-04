@@ -380,177 +380,40 @@ export default function App() {
     setMessages((prev) => [...prev, userMsg, { role: 'assistant', content: '', streaming: true, id: assistantId }]);
     setInput('');
     setLoading(true);
+
     try {
       const res = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, message: userMsg.content })
+        body: JSON.stringify({ token, message: messageText })
       });
+
       if (!res.ok) {
         const errText = await res.text();
-        setError(errText || 'Chat failed');
-        setMessages((prev) => prev.filter((m) => m.id !== assistantId));
-        return;
-      }
-      if (!res.body) {
-        setError('No response body from server');
-        setMessages((prev) => prev.filter((m) => m.id !== assistantId));
-        return;
+        throw new Error(errText || 'Request failed');
       }
 
-      const contentType = res.headers.get('content-type') || '';
-      const isSse = contentType.includes('text/event-stream');
-      const isJson = contentType.includes('application/json');
-      const streamDebug = localStorage.getItem('stream_debug') === '1';
+      const payload = await res.json();
+      const assistantContent = payload.note
+        ? `${payload.note}
 
-      const appendDelta = (delta) => {
-        if (!delta) return;
-        setMessages((prev) => {
-          const updated = [...prev];
-          const idx = updated.findIndex((m) => m.id === assistantId);
-          if (idx !== -1) {
-            const current = updated[idx];
-            updated[idx] = {
-              ...current,
-              content: `${current.content || ''}${delta}`,
-              streaming: true
-            };
-          }
-          return updated;
-        });
-      };
+${payload.message || ''}`.trim()
+        : payload.message;
 
-      const finishStream = (sources = []) => {
-        setMessages((prev) => {
-          const updated = [...prev];
-          const idx = updated.findIndex((m) => m.id === assistantId);
-          if (idx !== -1) {
-            updated[idx] = { ...updated[idx], streaming: false, sources };
-          }
-          return updated;
-        });
-        setLoading(false);
-      };
-
-      const handlePayload = (payload) => {
-        if (!payload) return;
-        if (streamDebug) {
-          // eslint-disable-next-line no-console
-          console.log('[stream][payload]', payload);
-        }
-
-        if (payload.type === 'token') {
-          appendDelta(payload.token || '');
-          return;
-        }
-
-        if (payload.type === 'response.output_text.delta') {
-          appendDelta(payload.delta || '');
-          return;
-        }
-
-        if (payload.delta && typeof payload.delta === 'string') {
-          appendDelta(payload.delta);
-          return;
-        }
-
-        if (payload.type === 'done' || payload.type === 'response.completed' || payload.type === 'response.finished') {
-          finishStream(payload.sources || []);
-          return;
-        }
-
-        if (payload.type === 'error') {
-          setError(payload.message || 'Chat failed');
-          setMessages((prev) => prev.filter((m) => m.id !== assistantId));
-          setLoading(false);
-        }
-      };
-
-      if (isSse && res.body) {
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let parseFailed = false;
-
-        const processChunk = (chunk, isFinal = false) => {
-          const text = decoder.decode(chunk || new Uint8Array(), { stream: !isFinal });
-          buffer += text;
-          const lines = buffer.split('\n');
-          if (!isFinal) {
-            buffer = lines.pop();
-          } else {
-            buffer = '';
-          }
-
-          lines.forEach((line) => {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith('data:')) return;
-            const payloadText = trimmed.slice(5).trim();
-            if (streamDebug) {
-              // eslint-disable-next-line no-console
-              console.log('[stream][raw]', payloadText);
-            }
-            if (payloadText === '[DONE]') {
-              finishStream();
-              return;
-            }
-            try {
-              const payload = JSON.parse(payloadText);
-              handlePayload(payload);
-            } catch (err) {
-              parseFailed = true;
-              // eslint-disable-next-line no-console
-              console.warn('Streaming parse failed; delivering partial content', payloadText, err);
-            }
-          });
-        };
-
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          const { value, done } = await reader.read();
-          processChunk(value, done);
-          if (done) break;
-        }
-
-        if (parseFailed) {
-          setError((prev) => prev || 'Streaming interrupted; partial response shown');
-          finishStream();
-        }
-
-        await refreshConversations();
-        return;
-      }
-
-      // Non-streaming JSON response
-      if (isJson) {
-        const payload = await res.json();
-        handlePayload(payload);
-        finishStream(payload.sources || []);
-        await refreshConversations();
-        return;
-      }
-
-      // Fallback: attempt JSON parse from full text
-      const text = await res.text();
-      try {
-        const payload = JSON.parse(text);
-        handlePayload(payload);
-        finishStream(payload.sources || []);
-      } catch (err) {
-        appendDelta(text);
-        finishStream();
-        setError((prev) => prev || 'Received non-JSON response; displayed raw text');
-      }
-
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: assistantContent || '', streaming: false, sources: payload.sources || [] }
+            : m
+        )
+      );
       await refreshConversations();
     } catch (err) {
       setError(err.message);
       setMessages((prev) => prev.filter((m) => m.id !== assistantId));
     } finally {
       setLoading(false);
-      setMessages((prev) =>
-        prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m))
-      );
+      setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)));
     }
   }
 

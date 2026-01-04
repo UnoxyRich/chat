@@ -272,62 +272,7 @@ export async function retrieveContext(db, client, query, requestId = 'retrieve-u
   );
 
   const maxScore = top.length ? top[0].score : null;
-  const minTopScore = top.length ? top[top.length - 1].score : null;
-  const minScore = Number.isFinite(CONFIG.retrieval.minScore) ? CONFIG.retrieval.minScore : 0;
-  const filtered = top.filter((item) => item.score >= minScore);
-
-  console.log(
-    JSON.stringify(
-      {
-        event: 'similarity_search',
-        requestId,
-        totalEmbeddings: rows.length,
-        topK: CONFIG.retrieval.topK,
-        returnedTop: top.length,
-        filteredHits: filtered.length,
-        maxScore,
-        minTopScore,
-        threshold: minScore
-      },
-      null,
-      2
-    )
-  );
-
-  if (filtered.length === 0 && top.length > 0) {
-    console.warn(
-      JSON.stringify(
-        {
-          event: 'RAG_FILTER_DROPPED_ALL_RESULTS',
-          requestId,
-          threshold: minScore,
-          scores: top.map((item) => item.score)
-        },
-        null,
-        2
-      )
-    );
-  }
-
-  const chosen = filtered.length ? filtered : top;
-  if (filtered.length === 0 && top.length > 0) {
-    console.warn(
-      JSON.stringify(
-        {
-          event: 'rag_filter_override',
-          requestId,
-          reason: 'filtered_hits_zero',
-          injectedFilename: top[0].filename,
-          injectedChunkIndex: top[0].chunkIndex,
-          injectedScore: top[0].score
-        },
-        null,
-        2
-      )
-    );
-  }
-
-  const contextChunks = chosen.map((item) => ({
+  const contextChunks = top.map((item) => ({
     text: `Source: ${item.filename} [chunk ${item.chunkIndex}]\n${item.text}`,
     filename: item.filename,
     chunkIndex: item.chunkIndex,
@@ -343,14 +288,14 @@ export async function retrieveContext(db, client, query, requestId = 'retrieve-u
         containsNonAscii,
         containsCJK,
         maxScore,
-        documents: chosen.map((item) => ({ filename: item.filename, chunkIndex: item.chunkIndex, score: item.score }))
+        documents: top.map((item) => ({ filename: item.filename, chunkIndex: item.chunkIndex, score: item.score }))
       },
       null,
       2
     )
   );
 
-  return { contextChunks, sources: chosen, maxScore };
+  return { contextChunks, sources: top, maxScore };
 }
 
 export function validateLMStudioEndpoint() {

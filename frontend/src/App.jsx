@@ -126,33 +126,30 @@ function MarkdownContent({ content }) {
   return <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-function useConversation() {
+function useConversationManager() {
   const [token, setToken] = useState(null);
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [conversations, setConversations] = useState([]);
+  const [initializing, setInitializing] = useState(true);
 
-  useEffect(() => {
-    async function initToken() {
-      const params = new URLSearchParams(window.location.search);
-      const existing = params.get('token') || localStorage.getItem('conversation_token');
-      if (existing) {
-        setToken(existing);
-        await loadConversation(existing);
-        return;
-      }
-      const res = await fetch(`${API_BASE}/api/token`, { method: 'POST' });
-      const data = await res.json();
-      setToken(data.token);
-      localStorage.setItem('conversation_token', data.token);
-      const url = new URL(window.location.href);
-      url.searchParams.set('token', data.token);
-      window.history.replaceState({}, '', url.toString());
-    }
-    initToken();
-  }, []);
+  const persistToken = (tok) => {
+    localStorage.setItem('conversation_token', tok);
+    const url = new URL(window.location.href);
+    url.searchParams.set('token', tok);
+    window.history.replaceState({}, '', url.toString());
+  };
 
-  async function loadConversation(tok) {
+  const refreshConversations = async () => {
+    const res = await fetch(`${API_BASE}/api/conversations`);
+    const data = await res.json();
+    setConversations(data.conversations || []);
+    return data.conversations || [];
+  };
+
+  const loadConversation = async (tok) => {
     setLoading(true);
+    setMessages([]);
     try {
       const res = await fetch(`${API_BASE}/api/conversation/${tok}`);
       const data = await res.json();
@@ -160,9 +157,70 @@ function useConversation() {
     } finally {
       setLoading(false);
     }
-  }
+  };
 
-  return { token, messages, setMessages, loading, setLoading, loadConversation };
+  const switchConversation = async (tok) => {
+    if (!tok) return;
+    setToken(tok);
+    persistToken(tok);
+    await loadConversation(tok);
+  };
+
+  const createConversation = async () => {
+    const res = await fetch(`${API_BASE}/api/token`, { method: 'POST' });
+    const data = await res.json();
+    persistToken(data.token);
+    setToken(data.token);
+    await refreshConversations();
+    await loadConversation(data.token);
+    return data.token;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    async function init() {
+      const params = new URLSearchParams(window.location.search);
+      let initialToken = params.get('token') || localStorage.getItem('conversation_token');
+      const existing = await refreshConversations();
+      if (cancelled) return;
+      let createdDuringInit = false;
+
+      if (!initialToken) {
+        if (existing.length > 0) {
+          initialToken = existing[0].id;
+          persistToken(initialToken);
+        } else {
+          initialToken = await createConversation();
+          createdDuringInit = true;
+          if (cancelled) return;
+        }
+      }
+
+      if (!createdDuringInit) {
+        await switchConversation(initialToken);
+      }
+      if (!cancelled) {
+        setInitializing(false);
+      }
+    }
+    init();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return {
+    token,
+    messages,
+    setMessages,
+    loading,
+    setLoading,
+    conversations,
+    refreshConversations,
+    createConversation,
+    switchConversation,
+    initializing
+  };
 }
 
 function Message({ role, content }) {
@@ -199,10 +257,59 @@ function StarterPrompts({ onSelect }) {
   );
 }
 
+function ConversationList({ conversations, activeToken, onSelect, onNew }) {
+  return (
+    <aside className="chat-menu" aria-label="Chat sessions">
+      <div className="chat-menu-header">
+        <div>
+          <p className="chat-menu-title">Chats</p>
+          <p className="chat-menu-caption">Switch without sharing history</p>
+        </div>
+        <button type="button" className="new-chat" onClick={onNew}>
+          + New Chat
+        </button>
+      </div>
+      <div className="chat-menu-body">
+        {conversations.length === 0 ? (
+          <div className="chat-menu-empty">No chats yet</div>
+        ) : (
+          conversations.map((chat) => {
+            const preview = chat.first_user_message || 'Empty chat';
+            const timestamp = new Date(chat.last_active_at || chat.created_at).toLocaleString();
+            return (
+              <button
+                key={chat.id}
+                type="button"
+                className={`chat-menu-item ${activeToken === chat.id ? 'active' : ''}`}
+                onClick={() => onSelect(chat.id)}
+              >
+                <div className="chat-menu-primary">{preview}</div>
+                <div className="chat-menu-meta">{timestamp}</div>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </aside>
+  );
+}
+
 export default function App() {
-  const { token, messages, setMessages, loading, setLoading } = useConversation();
+  const {
+    token,
+    messages,
+    setMessages,
+    loading,
+    setLoading,
+    conversations,
+    refreshConversations,
+    createConversation,
+    switchConversation,
+    initializing
+  } = useConversationManager();
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
+  const [indexingStatus, setIndexingStatus] = useState({ state: 'idle', queue: [] });
   const chatRef = useRef(null);
 
   useEffect(() => {
@@ -217,13 +324,37 @@ export default function App() {
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
   }, [loading]);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function loadStatus() {
+      try {
+        const res = await fetch(`${API_BASE}/api/indexing/status`);
+        const data = await res.json();
+        if (!cancelled) {
+          setIndexingStatus(data);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setIndexingStatus((prev) => ({ ...prev, error: err.message }));
+        }
+      }
+    }
+
+    loadStatus();
+    const interval = setInterval(loadStatus, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
   const handleStarter = (prompt) => {
     sendMessage(prompt);
   };
 
   async function sendMessage(messageOverride) {
     const messageText = typeof messageOverride === 'string' ? messageOverride : input;
-    if (!messageText.trim() || !token) return;
+    if (!messageText.trim() || !token || initializing) return;
     setError('');
     const userMsg = { role: 'user', content: messageText, local: true };
     setMessages((prev) => [...prev, userMsg]);
@@ -242,6 +373,7 @@ export default function App() {
       }
       const data = await res.json();
       setMessages((prev) => [...prev.slice(0, -1), userMsg, { role: 'assistant', content: data.reply }]);
+      refreshConversations();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -261,6 +393,22 @@ export default function App() {
     }
   };
 
+  const handleSelectConversation = async (tok) => {
+    if (!tok || tok === token) return;
+    setError('');
+    setInput('');
+    await switchConversation(tok);
+  };
+
+  const handleNewChat = async () => {
+    setError('');
+    setInput('');
+    await createConversation();
+  };
+
+  const showIndexing = indexingStatus.state === 'indexing' || (indexingStatus.queue || []).length > 0;
+  const currentLabel = indexingStatus.currentFile === 'initial-scan' ? 'Preparing knowledge base' : indexingStatus.currentFile;
+
   return (
     <div className="app-shell">
       <div className="bg-glow glow-one" />
@@ -273,41 +421,76 @@ export default function App() {
         </header>
 
         <main className="panel">
-          <div className="chat-surface">
-            <div className="chat-window" ref={chatRef} aria-live="polite">
-              {messages.length === 0 && !loading ? (
-                <StarterPrompts onSelect={handleStarter} />
-              ) : (
-                <>
-                  {messages.map((msg, idx) => (
-                    <Message key={idx} role={msg.role} content={msg.content} />
-                  ))}
-                  {loading && (
-                    <div className="message assistant">
-                      <div className="typing">
-                        <span />
-                        <span />
-                        <span />
+          <div className="panel-body">
+            <ConversationList
+              conversations={conversations}
+              activeToken={token}
+              onSelect={handleSelectConversation}
+              onNew={handleNewChat}
+            />
+
+            <div className="chat-surface">
+              <div className="indexing-status" role="status" aria-live="polite">
+                {showIndexing ? (
+                  <>
+                    <span className="status-dot active" />
+                    <div>
+                      <div className="status-title">Indexing new documents…</div>
+                      <div className="status-caption">
+                        {currentLabel ? `Working on ${currentLabel}` : 'Queueing detected uploads'}
+                        {indexingStatus.queue && indexingStatus.queue.length > 0
+                          ? ` • Next: ${indexingStatus.queue.join(', ')}`
+                          : ''}
                       </div>
                     </div>
-                  )}
-                </>
-              )}
-              {error && <div className="alert">{error}</div>}
-            </div>
-
-            <form className="chat-form" onSubmit={handleSubmit}>
-              <div className="input-wrapper">
-                <textarea
-                  value={input}
-                  placeholder="Type your message here..."
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  disabled={!token || loading}
-                  rows={2}
-                />
+                  </>
+                ) : (
+                  <>
+                    <span className="status-dot" />
+                    <div>
+                      <div className="status-title">Knowledge base ready</div>
+                      <div className="status-caption">Watching for new PDFs in /files-for-uploading</div>
+                    </div>
+                  </>
+                )}
               </div>
-            </form>
+              <div className="chat-window" ref={chatRef} aria-live="polite">
+                {initializing ? (
+                  <div className="chat-loading">Loading chats…</div>
+                ) : messages.length === 0 && !loading ? (
+                  <StarterPrompts onSelect={handleStarter} />
+                ) : (
+                  <>
+                    {messages.map((msg, idx) => (
+                      <Message key={idx} role={msg.role} content={msg.content} />
+                    ))}
+                    {loading && (
+                      <div className="message assistant">
+                        <div className="typing">
+                          <span />
+                          <span />
+                          <span />
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+                {error && <div className="alert">{error}</div>}
+              </div>
+
+              <form className="chat-form" onSubmit={handleSubmit}>
+                <div className="input-wrapper">
+                  <textarea
+                    value={input}
+                    placeholder="Type your message here..."
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    disabled={!token || loading || initializing}
+                    rows={2}
+                  />
+                </div>
+              </form>
+            </div>
           </div>
         </main>
       </div>

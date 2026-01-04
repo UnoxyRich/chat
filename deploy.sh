@@ -108,7 +108,8 @@ fi
 
 # Wait for the backend health check to succeed.
 HEALTH_URL="http://localhost:3000/health"
-for attempt in $(seq 1 20); do
+MAX_ATTEMPTS=1000
+for attempt in $(seq 1 $MAX_ATTEMPTS); do
   if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
     status "Backend is healthy at $HEALTH_URL (PID $(cat "$ROOT_DIR/.backend.pid"))."
     break
@@ -117,10 +118,10 @@ for attempt in $(seq 1 20); do
   if ! kill -0 "$(cat "$ROOT_DIR/.backend.pid")" >/dev/null 2>&1; then
     fail "Backend process exited before becoming healthy. Check $BACKEND_LOG for details."
   fi
-  if [ "$attempt" -eq 20 ]; then
-    fail "Backend did not become healthy. Check $BACKEND_LOG for details."
+  if [ "$attempt" -eq $MAX_ATTEMPTS ]; then
+    fail "Backend did not become healthy after $MAX_ATTEMPTS attempts. Check $BACKEND_LOG for details."
   fi
-  status "Waiting for backend to become ready (attempt $attempt)..."
+  status "Waiting for backend to become ready (attempt $attempt/$MAX_ATTEMPTS)..."
 done
 
 status "Deployment complete. Chat UI available via backend on port ${PORT}."
